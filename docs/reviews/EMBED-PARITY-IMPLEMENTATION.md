@@ -1,6 +1,6 @@
 # TC embed parity: implementation and verification
 
-As of 2026-10-09. Local branch `feat/embed-parity`, based on latest pulled
+As of 2026-10-10. Local branch `feat/embed-parity`, based on latest pulled
 `main` at `7e4e2c08ede01c257601ab99e32f128dffb249c0` / v0.3.14.
 Implementation and documentation are prepared for delivery on this branch.
 The installed daemon was not upgraded or restarted. The original
@@ -169,4 +169,32 @@ MCP guards (`job_01a122bae2dc731a83777331d10ccfa1`). Dependency policy also
 passed (`job_01a122b7eca77700b02084b9d682716f`); the existing duplicate-crate
 warnings remain. The Windows gate passed its 25 selected tests and daemon/MCP
 checks (`job_01a122bdb2c37631a6ff4e5b26468a8c`); the local ConPTY opt-in check
-was skipped. Fresh remote checks are pending.
+was skipped. The subsequent remote run is recorded below.
+
+### Cgroup CPU comparison follow-up
+
+Remote run `37998515445` on `782589f` passed both OS gates, all five platform
+builds, install smoke and npm packaging. Linux passed all 1,659 tests / 8 skipped,
+including the original fixture and cancellation regressions. Windows also drove
+the opt-in live ConPTY cases successfully. The separate delegated-cgroup job
+failed `disabled_governor_is_byte_identical_to_ungoverned`: its normalized
+responses differed only in the typed CPU observation. The disabled job used
+`linux_process_group` with `unknown: job_exited`; the governed job used its owned
+`linux_cgroup` with `unavailable: query_failed` after cgroup teardown.
+
+The test now checks that each CPU sample and process identity belong to the
+reported job. Only when Linux actually selects cgroup governance does it assert
+the two distinct accounting sources and align CPU observations for the remaining
+byte comparison. Other response fields retain strict equality; other platforms
+and governance modes retain the original CPU comparison. Terminal CPU states are
+not hardcoded: the contract permits typed known, unknown and unavailable evidence.
+Production CPU accounting, teardown and cleanup behavior are unchanged.
+
+The focused local regression passed (`job_01a122ce1e6570e3b70d90ed6f42071d`).
+The final Linux gate passed 1,659 tests / 8 skipped, strict clippy/fmt, load and
+MCP guards (`job_01a122d3623172f7b20555c04d880ea4`, observed exit 0). The
+sequential Windows gate passed its 25 selected tests and daemon/MCP checks
+(`job_01a122d60edb7039bcc36f8dd18ead1f`, observed exit 0); local ConPTY was
+explicitly skipped. This WSL host selects rlimit rather than an owned cgroup,
+so delegated-cgroup CI is still required at publication to establish the
+correction in its affected environment.
