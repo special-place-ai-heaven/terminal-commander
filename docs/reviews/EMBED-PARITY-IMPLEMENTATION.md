@@ -135,3 +135,38 @@ tests, including the original live check, passed
 (`job_01a1229dd299764082d3210388e4b246`); its local ConPTY opt-in check was
 skipped. Fresh remote checks are required before treating the follow-up as
 ready to release.
+
+### Cancellation proof follow-up
+
+The next Linux CI run (`37995493981`, head `67b0bd8`) passed the original live
+fixture check, then failed `stopped_command_eventually_reports_completed_cleanup`
+after 3.329 seconds. Windows's remote pre-build gate passed. The failed assertion
+did not include the observed cleanup value, so the log alone cannot establish
+which cleanup state was returned.
+
+Investigation found a dropped verification retry: Linux's bounded `/proc` scan
+can return `TimedOut` after 20 ms, but `wait_stopped` propagated the first error
+immediately despite its existing 100 ms proof window. The correction retries
+only timed-out observations within that same window and its existing 5 ms
+interval. Exhausted timeouts and other errors remain uncertain; only an observed
+successful proof can publish complete cleanup. No command or process-group
+signal is replayed, and the live test still requires complete cleanup within
+its original deadline.
+
+The transient-timeout regression failed before the production correction
+(`job_01a122b44ee472d0919b4e5d1fdb7406`, exit 100). Three final proof-loop
+tests pass with Tokio's paused clock, including persistent timeout exhaustion
+and immediate non-timeout error propagation
+(`job_01a122b781e97079baf54d1f0b0efc2b`). The probes crate enables the existing
+Tokio package's `test-util` feature only for development; no crate/version or
+lockfile change is introduced. The unchanged live cancelled-command test also
+passes (`job_01a122b7c2c87195b451a8d45186f128`). Its pre-fix ten local runs
+all passed; the deterministic proof-loop regression, rather than those live
+passes, establishes the dropped-retry defect.
+
+The full Linux gate passed 1,659 tests / 8 skipped, strict clippy/fmt, load and
+MCP guards (`job_01a122bae2dc731a83777331d10ccfa1`). Dependency policy also
+passed (`job_01a122b7eca77700b02084b9d682716f`); the existing duplicate-crate
+warnings remain. The Windows gate passed its 25 selected tests and daemon/MCP
+checks (`job_01a122bdb2c37631a6ff4e5b26468a8c`); the local ConPTY opt-in check
+was skipped. Fresh remote checks are pending.

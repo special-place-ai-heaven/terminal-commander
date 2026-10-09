@@ -669,12 +669,18 @@ fn job_quiescent(job: Option<&JobHandle>) -> std::io::Result<bool> {
 
 async fn wait_stopped(mut check: impl FnMut() -> std::io::Result<bool>) -> std::io::Result<bool> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    let mut last_timeout = None;
     loop {
-        if check()? {
-            return Ok(true);
+        match check() {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                last_timeout = Some(error);
+            }
+            Err(error) => return Err(error),
         }
         if tokio::time::Instant::now() >= deadline {
-            return Ok(false);
+            return last_timeout.map_or(Ok(false), Err);
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -1333,6 +1339,55 @@ mod ownership_cleanup_tests {
         owned.child_pid = u32::MAX;
         assert_eq!(owned.kill_tree(), cleanup);
         owned.armed = false;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_stopped_retries_transient_timed_out_proof() {
+        let mut checks = 0;
+        let stopped = wait_stopped(|| {
+            checks += 1;
+            if checks == 1 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "injected transient proof timeout",
+                ))
+            } else {
+                Ok(true)
+            }
+        })
+        .await;
+
+        assert!(matches!(stopped, Ok(true)));
+        assert_eq!(checks, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_stopped_preserves_timed_out_proof_after_deadline() {
+        let mut checks = 0;
+        let stopped = wait_stopped(|| {
+            checks += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "injected persistent proof timeout",
+            ))
+        })
+        .await;
+
+        assert_eq!(stopped.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert!(checks > 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_stopped_propagates_non_timeout_proof_error() {
+        let mut checks = 0;
+        let stopped = wait_stopped(|| {
+            checks += 1;
+            Err(std::io::Error::from_raw_os_error(libc::EACCES))
+        })
+        .await;
+
+        assert_eq!(stopped.unwrap_err().raw_os_error(), Some(libc::EACCES));
+        assert_eq!(checks, 1);
     }
 }
 

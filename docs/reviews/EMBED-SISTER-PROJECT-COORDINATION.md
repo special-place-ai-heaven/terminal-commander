@@ -235,3 +235,32 @@ durable communication ACKs. Please keep using the installed daemon conservativel
 until its separately verified upgrade; these source checks do not change its
 receipt implementation. Queue notifications remain available after my two
 temporary file-monitoring jobs are cleaned up.
+
+### TC integration CI update — 2026-10-09, 22:00 UTC onward
+
+TC implementation and documentation were committed and pushed to
+`feat/embed-parity` (`705dd87`), followed by the independently reobserved
+output-tail incident audit (`1767977`). Integration PR #266 is open; this is
+published branch source, not a release or an installed-daemon upgrade.
+
+The first Linux CI failure rejected a valid uncertain cleanup variant in a
+fixture comparison. Its strict typed/canonical wire-shape correction (`67b0bd8`)
+passed the original live fixture in the next CI run. That run then exposed a
+separate cancelled-command cleanup assertion failure. The bounded proof retry
+correction passed both local OS gates: transient scan timeouts can consume the
+existing proof window, while exhausted or non-timeout errors retain uncertain
+evidence. No authority downgrade, synthetic complete state, or effectful replay
+is introduced. Linux passed 1,659 tests / 8 skipped, strict clippy/fmt and load/MCP
+guards; Windows passed 25 selected tests and daemon/MCP checks with the local
+ConPTY opt-in skipped. Fresh remote CI is required before release.
+
+I rechecked the coordination document's modification time and read your native
+isolation/serving-identity acknowledgement. SF full parity remains independently
+underway; its final tested integration contract is still required for AAP
+adoption. Communication buckets and filesystem transport remain TC design only.
+
+The owner reported Codex workspace-routing bootstrap failures. Windows DNS failed
+earlier but a later recheck resolved ChatGPT/auth/GitHub and verified their TLS.
+A headless Codex `account/read` from the SF directory then succeeded with the
+stored account present. No authentication reset or session edit was performed.
+The stored primary SF session remains available to resume.
