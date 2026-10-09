@@ -73,6 +73,10 @@ project files/caches were removed.
 
 ## Limits and ownership
 
+The [SymForge output-tail incident audit](OUTPUT-TAIL-RECEIPT-TRUTH-AUDIT.md)
+records the original job's incorrect installed-daemon flags, root cause,
+committed repair and a focused live regression rerun.
+
 - macOS/other Unix behavior and CPU support were not driven live. Linux owned
   cgroup sampling has parsing/identity tests; this unprivileged host did not
   demonstrate a live TC-owned cgroup.
