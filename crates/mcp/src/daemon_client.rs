@@ -309,6 +309,7 @@ fn blocking_deadline(request: &IpcRequest) -> Option<std::time::Duration> {
         // Spawn ACK: no caller hold. Fixed budget + the same margin.
         // Mutating; a timeout is still not retried (see `McpDaemonClient::call`).
         IpcRequest::CommandStartCombed(_)
+        | IpcRequest::CommandStartIsolated(_)
         | IpcRequest::PtyCommandStart(_)
         | IpcRequest::ShellExec(_)
         | IpcRequest::ShellSessionStart(_) => Some(SPAWN_ACK_BUDGET + BLOCKING_DEADLINE_MARGIN),
@@ -872,12 +873,15 @@ mod tests {
                         uptime_secs: 1,
                         idle_secs: Some(0),
                         version: String::new(),
+                        identity: None,
                     },
                     IpcRequest::SystemDiscover => IpcResponse::SystemDiscover(DiscoverResponse {
                         version: "0.1.0".to_owned(),
                         mcp_spec: String::new(),
                         policy_profile: String::new(),
                         methods: Vec::new(),
+                        capabilities: Vec::new(),
+                        identity: None,
                         environment: Box::default(),
                     }),
                     other => panic!("unexpected version probe: {other:?}"),
@@ -928,15 +932,18 @@ mod tests {
                     uptime_secs: 1,
                     idle_secs: Some(0),
                     version: "9.9.9".to_owned(),
+                    identity: None,
                 },
                 IpcRequest::SystemDiscover => {
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     IpcResponse::SystemDiscover(DiscoverResponse {
                         version: "9.9.9".to_owned(),
+                        identity: None,
                         mcp_spec: String::new(),
                         policy_profile: String::new(),
                         methods: Vec::new(),
                         environment: Box::default(),
+                        capabilities: Vec::new(),
                     })
                 }
                 other => panic!("unexpected version probe: {other:?}"),

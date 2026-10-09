@@ -216,8 +216,8 @@ pub struct RingTail {
     /// Frames evicted from the ring since creation. When > 0 the tail
     /// may not include the earliest output; callers should flag this.
     pub evicted_frames: u64,
-    /// True when the byte cap dropped one or more of the requested
-    /// trailing frames.
+    /// True when requested frame text exceeds the byte budget or selected
+    /// source frames report capture loss.
     pub truncated: bool,
 }
 
@@ -300,7 +300,9 @@ impl RingInner {
 
     /// Return the last `max_lines` frame texts, oldest first, bounded
     /// by `max_bytes` (newest frames win when the byte budget is
-    /// tight). Pure read; never mutates.
+    /// tight). An oversized newest frame contributes its longest UTF-8
+    /// suffix that fits; prior capture loss remains flagged. Pure read;
+    /// never mutates. The budget counts text bytes, excluding separators.
     fn tail(&self, max_lines: usize, max_bytes: usize) -> RingTail {
         let mut chosen: VecDeque<String> = VecDeque::new();
         let mut bytes = 0usize;
@@ -308,15 +310,23 @@ impl RingInner {
         for f in self.frames.iter().rev().take(max_lines) {
             let len = f.text.len();
             if chosen.is_empty() {
-                // Always include at least one line, even if it alone
-                // exceeds the cap; flag the overflow as truncated.
                 if len > max_bytes {
-                    truncated = true;
+                    let mut start = len - max_bytes;
+                    while !f.text.is_char_boundary(start) {
+                        start += 1;
+                    }
+                    chosen.push_front(f.text[start..].to_owned());
+                    return RingTail {
+                        lines: chosen.into_iter().collect(),
+                        evicted_frames: self.evicted_frames,
+                        truncated: true,
+                    };
                 }
-            } else if bytes + len > max_bytes {
+            } else if len > max_bytes.saturating_sub(bytes) {
                 truncated = true;
                 break;
             }
+            truncated |= f.truncated_bytes > 0;
             bytes += len;
             chosen.push_front(f.text.clone());
         }
@@ -345,6 +355,7 @@ impl RingInner {
                 truncated = true;
                 break;
             }
+            truncated |= f.truncated_bytes > 0;
             bytes += len;
             chosen.push(f.text.clone());
         }
@@ -976,6 +987,52 @@ mod tests {
     }
 
     #[test]
+    fn tail_frames_single_oversized_line_obeys_byte_budget() {
+        let mgr = ContextRingManager::new();
+        let pid = ProbeId::new();
+        mgr.create_ring_default(pid).unwrap();
+        mgr.append_frame(pid, frame(pid, "0123456789", 1)).unwrap();
+        let tail = mgr.tail_frames(pid, 10, 4).unwrap();
+        assert_eq!(tail.lines, ["6789"]);
+        assert!(tail.truncated);
+    }
+
+    #[test]
+    fn tail_frames_byte_budget_preserves_utf8_suffix() {
+        let mgr = ContextRingManager::new();
+        let pid = ProbeId::new();
+        mgr.create_ring_default(pid).unwrap();
+        let text = "a\u{00e9}\u{1f980}z";
+        mgr.append_frame(pid, frame(pid, text, 1)).unwrap();
+        for budget in 0..=text.len() {
+            let tail = mgr.tail_frames(pid, 1, budget).unwrap();
+            assert_eq!(tail.lines.len(), 1);
+            assert!(tail.lines[0].len() <= budget, "budget {budget}");
+            assert!(text.ends_with(&tail.lines[0]));
+            assert_eq!(tail.truncated, budget < text.len());
+        }
+    }
+
+    #[test]
+    fn tail_frames_reports_frame_and_upstream_capture_loss() {
+        let mgr = ContextRingManager::new();
+        let pid = ProbeId::new();
+        mgr.create_ring_default(pid).unwrap();
+        mgr.append_frame(pid, frame(pid, &"x".repeat(50_000), 1))
+            .unwrap();
+        let tail = mgr.tail_frames(pid, 1, MAX_WINDOW_BYTES).unwrap();
+        assert_eq!(tail.lines[0].len(), MAX_FRAME_BYTES);
+        assert!(tail.truncated, "frame capture cap must remain visible");
+
+        let mut upstream = frame(pid, "kept", 2);
+        upstream.truncated_bytes = 37;
+        mgr.append_frame(pid, upstream).unwrap();
+        let tail = mgr.tail_frames(pid, 1, MAX_WINDOW_BYTES).unwrap();
+        assert_eq!(tail.lines, ["kept"]);
+        assert!(tail.truncated, "upstream capture cap must remain visible");
+    }
+
+    #[test]
     fn head_frames_returns_oldest_retained_and_reports_eviction() {
         let mgr = ContextRingManager::new();
         let pid = ProbeId::new();
@@ -1019,5 +1076,18 @@ mod tests {
         assert_eq!(head.lines, vec!["xxx0", "xxx1"]);
         assert!(head.truncated);
         assert!(mgr.head_frames(ProbeId::new(), 5, 9).is_err());
+    }
+
+    #[test]
+    fn head_frames_reports_capture_loss_in_a_short_retained_frame() {
+        let mgr = ContextRingManager::new();
+        let pid = ProbeId::new();
+        mgr.create_ring_default(pid).unwrap();
+        let mut first = frame(pid, "kept", 1);
+        first.truncated_bytes = 8;
+        mgr.append_frame(pid, first).unwrap();
+        let head = mgr.head_frames(pid, 1, 2048).unwrap();
+        assert_eq!(head.lines, ["kept"]);
+        assert!(head.truncated, "head capture loss must remain visible");
     }
 }

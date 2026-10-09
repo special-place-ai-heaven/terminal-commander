@@ -772,6 +772,12 @@ impl UnixGovernor {
         Arc::clone(&self.report)
     }
 
+    /// The verified per-job cgroup; host-wide ceilings are never used as job CPU scope.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn cgroup_path(&self) -> Option<std::path::PathBuf> {
+        self.cgroup.clone()
+    }
+
     /// The `pre_exec` hook: join the cgroup, lower `RLIMIT_DATA`, raise nice.
     /// Errors are
     /// ignored on purpose: a failing `pre_exec` would abort the spawn, and the

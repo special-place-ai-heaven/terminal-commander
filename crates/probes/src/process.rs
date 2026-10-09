@@ -3,6 +3,11 @@
 
 //! Process probe runtime.
 //!
+//! Unix ownership requires exclusive reaping of TC's children: the host must not
+//! use a competing `waitpid(-1)` reaper or change SIGCHLD to automatic reaping.
+//! TC retains the unreaped group leader through its last group signal. Processes
+//! that leave the owned group remain outside that ownership boundary.
+//!
 //! Windows: `ProcessProbe::spawn` calls `terminal_commander_core::windows_silent`
 //! on the underlying `std::process::Command` so GUI-subsystem daemon children do
 //! not allocate a visible console. The JS bridge (`lib/wsl/spawn.js`) intentionally
@@ -10,19 +15,23 @@
 
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use parking_lot::Mutex;
 use terminal_commander_core::{
-    BucketId, ContextRingManager, EventDraft, ProbeId, SourceFrame, SourceStream,
+    BucketId, ContextRingManager, EnvironmentMode, EventDraft, ObservationIncompleteReason,
+    PipeReadErrorKind, PipeReadFailure, ProbeId, ProcessCleanup, ProcessIdentity,
+    ProcessObservation, ProcessOwnership, SourceFrame, SourceStream, StreamObservationState,
 };
 use terminal_commander_sifters::SifterRuntime;
 
 use crate::governor::{GovernorReport, JobLimits, SharedReport};
 use crate::noise_pipeline::{ProbeNoisePipeline, SharedProbeNoisePipeline};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, BufReader, ReadBuf};
 use tokio::process::Command;
 use tokio::sync::oneshot;
 
@@ -39,12 +48,11 @@ pub struct ProcessProbeConfig {
     /// Working directory for the child process. Passed through to
     /// the child; the advisory-policy seam in TC22 will gate this.
     pub cwd: Option<PathBuf>,
-    /// Environment OVERLAY. The child always inherits the daemon's
-    /// parent environment; each `(key, value)` here is ADDED to it
-    /// (or overrides an existing entry). Empty Vec = inherit unchanged.
+    /// Environment overlay. `spawn` inherits the parent's environment;
+    /// `spawn_with_environment` can explicitly clear it before this overlay.
     pub env: Vec<(OsString, OsString)>,
     /// Grace window between graceful and forced termination.
-    /// Currently advisory; cancellation in MVP is forced kill only.
+    /// Unix cancellation sends TERM then escalates to KILL after this window.
     pub grace: Duration,
     /// Strip ANSI/CSI/OSC escape sequences before sifter rule matching
     /// and in emitted summaries (TC-B1, FR-026). The RAW bytes are
@@ -87,6 +95,10 @@ pub struct ProcessProbeMetrics {
     pub frames_stdout: u64,
     pub frames_stderr: u64,
     pub bytes_total: u64,
+    /// Last successful raw pipe read, before decoding or framing.
+    pub last_output_at: Option<std::time::Instant>,
+    pub observation: ProcessObservation,
+    pub cleanup: ProcessCleanup,
     pub events_emitted: u64,
     pub frames_suppressed: u64,
     pub frames_suppressed_progress: u64,
@@ -98,10 +110,94 @@ pub struct ProcessProbeMetrics {
 /// Errors from running a process probe.
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessProbeError {
+    #[error("process probes require an active Tokio runtime")]
+    MissingRuntime,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("probe was cancelled before the child exited")]
     Cancelled,
+}
+
+/// Child exit and output completeness are independent. A successful exit must
+/// not be interpreted as a complete observation when a pipe failed.
+#[derive(Debug, Clone)]
+pub struct ProcessProbeReport {
+    pub exit_status: std::process::ExitStatus,
+    pub cancelled: bool,
+    pub observation: ProcessObservation,
+    pub cleanup: ProcessCleanup,
+}
+
+/// Sits below decoding and buffering: every successful OS read is observable
+/// even while the line framer is waiting for a delimiter.
+struct ObservedReader<R> {
+    inner: R,
+    kind: SourceStream,
+    metrics: Arc<Mutex<ProcessProbeMetrics>>,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ObservedReader<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let capacity = buf.remaining();
+        let result = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if let Poll::Ready(ref outcome) = result {
+            let mut metrics = this.metrics.lock();
+            let bytes = (buf.filled().len() - before) as u64;
+            if bytes > 0 {
+                metrics.bytes_total = metrics.bytes_total.saturating_add(bytes);
+                metrics.last_output_at = Some(std::time::Instant::now());
+            }
+            let stream = match this.kind {
+                SourceStream::Stdout => &mut metrics.observation.stdout,
+                SourceStream::Stderr => &mut metrics.observation.stderr,
+                _ => return result,
+            };
+            stream.bytes_total = stream.bytes_total.saturating_add(bytes);
+            match outcome {
+                Ok(()) if bytes == 0 && capacity > 0 => {
+                    stream.state = StreamObservationState::Complete;
+                }
+                Err(error) => {
+                    stream.state = StreamObservationState::Failed(pipe_failure(error));
+                }
+                Ok(()) => {}
+            }
+        }
+        result
+    }
+}
+
+fn pipe_failure(error: &std::io::Error) -> PipeReadFailure {
+    use std::io::ErrorKind;
+    PipeReadFailure {
+        kind: match error.kind() {
+            ErrorKind::Interrupted => PipeReadErrorKind::Interrupted,
+            ErrorKind::PermissionDenied => PipeReadErrorKind::PermissionDenied,
+            ErrorKind::BrokenPipe => PipeReadErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset => PipeReadErrorKind::ConnectionReset,
+            ErrorKind::UnexpectedEof => PipeReadErrorKind::UnexpectedEof,
+            ErrorKind::TimedOut => PipeReadErrorKind::TimedOut,
+            _ => PipeReadErrorKind::Other,
+        },
+        raw_os_error: error.raw_os_error(),
+    }
+}
+
+fn finish_observation(metrics: &mut ProcessProbeMetrics, reason: ObservationIncompleteReason) {
+    for stream in [
+        &mut metrics.observation.stdout,
+        &mut metrics.observation.stderr,
+    ] {
+        if stream.state == StreamObservationState::Reading {
+            stream.state = StreamObservationState::Incomplete(reason);
+        }
+    }
 }
 
 /// Sink that receives `EventDraft`s as the probe matches them.
@@ -209,20 +305,406 @@ pub struct ProcessProbe {
     probe_id: ProbeId,
     metrics: Arc<Mutex<ProcessProbeMetrics>>,
     cancel_tx: Option<oneshot::Sender<()>>,
-    join: Option<tokio::task::JoinHandle<Result<std::process::ExitStatus, ProcessProbeError>>>,
-    /// Child PID captured at spawn (Windows console regression tests).
-    #[cfg(windows)]
-    child_pid: u32,
-    /// Job Object owning the child's whole process tree (Windows). Held so the
-    /// tree is torn down on `Drop` even without an explicit cancel
-    /// (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`). Shared (`Arc`) with the
-    /// lifecycle task, which terminates the job on cancel. `None` if the job
-    /// could not be created (the cancel path then falls back to a
-    /// single-process kill).
-    #[cfg(windows)]
-    _job: Option<Arc<JobHandle>>,
-    /// Resource governor report, finished by the lifecycle task at exit.
+    join: Option<tokio::task::JoinHandle<Result<ProcessProbeReport, ProcessProbeError>>>,
+    identity: ProcessIdentity,
+    cpu_sampler: Arc<Mutex<crate::job_cpu::JobCpuSampler>>,
     governor: SharedReport,
+    report: Option<ProcessProbeReport>,
+}
+
+impl Drop for ProcessProbe {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+struct OwnedProcess {
+    child: Option<tokio::process::Child>,
+    child_pid: u32,
+    metrics: Arc<Mutex<ProcessProbeMetrics>>,
+    #[cfg(windows)]
+    job: Option<Arc<JobHandle>>,
+    armed: bool,
+    signal_cleanup: Option<ProcessCleanup>,
+}
+
+impl OwnedProcess {
+    const fn child_mut(&mut self) -> &mut tokio::process::Child {
+        self.child.as_mut().expect("owned child exists until drop")
+    }
+
+    /// Deliver the final group/job signal exactly once, before releasing the leader anchor.
+    fn kill_tree(&mut self) -> ProcessCleanup {
+        if let Some(cleanup) = self.signal_cleanup {
+            return cleanup;
+        }
+        #[cfg(unix)]
+        let result = signal_process_group(self.child_pid, libc::SIGKILL);
+        #[cfg(windows)]
+        let result = self.job.as_deref().map_or_else(
+            || Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+            terminate_job,
+        );
+        #[cfg(not(any(unix, windows)))]
+        let result: std::io::Result<()> = Err(std::io::ErrorKind::Unsupported.into());
+        let cleanup = match result {
+            Ok(()) => ProcessCleanup::Reaping,
+            Err(error) => ProcessCleanup::Uncertain {
+                raw_os_error: error.raw_os_error(),
+            },
+        };
+        // This permanently disarms numeric group signalling, including Drop during a later wait.
+        self.signal_cleanup = Some(cleanup);
+        let _ = self.child_mut().start_kill();
+        cleanup
+    }
+
+    async fn observe_exit(&mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        let result = observe_unreaped_exit(self.child_pid).await;
+        #[cfg(not(unix))]
+        let result = self.child_mut().wait().await.map(|_| ());
+        #[cfg(unix)]
+        if let Err(error) = &result
+            && error.raw_os_error() == Some(libc::ECHILD)
+        {
+            // An external reaper or SIGCHLD disposition invalidated our anchor.
+            // Never signal an identity whose ownership is no longer provable.
+            self.armed = false;
+            self.metrics.lock().cleanup = ProcessCleanup::Uncertain {
+                raw_os_error: error.raw_os_error(),
+            };
+        }
+        result
+    }
+
+    #[cfg(unix)]
+    async fn graceful_stop(&self, grace: Duration) {
+        let _ = signal_process_group(self.child_pid, libc::SIGTERM);
+        wait_group_grace(self.child_pid, grace).await;
+    }
+
+    /// All group signals precede leader reaping. Delivery alone never proves completion.
+    async fn finish(&mut self) -> std::io::Result<(std::process::ExitStatus, ProcessCleanup)> {
+        let signalled = self.kill_tree();
+        #[cfg(target_os = "linux")]
+        let stopped = wait_stopped(|| group_quiescent(self.child_pid)).await;
+        let status = match self.child_mut().wait().await {
+            Ok(status) => status,
+            Err(error) => {
+                self.armed = false;
+                self.metrics.lock().cleanup = ProcessCleanup::Uncertain {
+                    raw_os_error: error.raw_os_error(),
+                };
+                return Err(error);
+            }
+        };
+        #[cfg(all(unix, not(target_os = "linux")))]
+        let stopped = wait_stopped(|| group_absent(self.child_pid)).await;
+        #[cfg(windows)]
+        let stopped = wait_stopped(|| job_quiescent(self.job.as_deref())).await;
+        #[cfg(not(any(unix, windows)))]
+        let stopped = Err(std::io::ErrorKind::Unsupported.into());
+        self.armed = false;
+        Ok((status, cleanup_from_proof(signalled, stopped)))
+    }
+}
+
+impl Drop for OwnedProcess {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let signalled = self.kill_tree();
+        let Some(child) = self.child.take() else {
+            return;
+        };
+        {
+            let mut metrics = self.metrics.lock();
+            finish_observation(&mut metrics, ObservationIncompleteReason::RuntimeLost);
+            metrics.cleanup = signalled;
+        }
+        let metrics = Arc::clone(&self.metrics);
+        let child_pid = self.child_pid;
+        #[cfg(windows)]
+        let job = self.job.clone();
+        // Keep Child owned while native waitpid runs; kill_on_drop is disabled, so
+        // dropping the stale Tokio wrapper after native reaping cannot kill a reused PID.
+        let reaper = std::thread::Builder::new()
+            .name("tc-probe-reaper".into())
+            .spawn(move || {
+                #[cfg(target_os = "linux")]
+                let stopped = wait_stopped_blocking(|| group_quiescent(child_pid));
+                #[cfg(unix)]
+                let reaped = reap_pid(child_pid);
+                #[cfg(all(unix, not(target_os = "linux")))]
+                let stopped = wait_stopped_blocking(|| group_absent(child_pid));
+                #[cfg(windows)]
+                let reaped = {
+                    use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+                    use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+                    // SAFETY: Child owns this exact process handle throughout the wait.
+                    child.raw_handle().map_or(Ok(()), |handle| {
+                        if unsafe { WaitForSingleObject(handle as HANDLE, INFINITE) }
+                            == WAIT_OBJECT_0
+                        {
+                            Ok(())
+                        } else {
+                            Err(std::io::Error::last_os_error())
+                        }
+                    })
+                };
+                #[cfg(windows)]
+                let stopped = wait_stopped_blocking(|| job_quiescent(job.as_deref()));
+                #[cfg(not(any(unix, windows)))]
+                let (reaped, stopped): (
+                    std::io::Result<()>,
+                    std::io::Result<bool>,
+                ) = (
+                    Err(std::io::ErrorKind::Unsupported.into()),
+                    Err(std::io::ErrorKind::Unsupported.into()),
+                );
+                let _ = child_pid;
+                drop(child);
+                metrics.lock().cleanup = cleanup_from_proof(signalled, reaped.and(stopped));
+            });
+        if let Err(error) = reaper {
+            self.metrics.lock().cleanup = ProcessCleanup::Uncertain {
+                raw_os_error: error.raw_os_error(),
+            };
+        }
+    }
+}
+
+#[cfg(unix)]
+fn signal_process_group(pgid: u32, signal: i32) -> std::io::Result<()> {
+    let pgid = i32::try_from(pgid).map_err(|_| std::io::ErrorKind::InvalidInput)?;
+    if pgid <= 0 {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    // SAFETY: a checked positive group id is negated for native group signaling.
+    if unsafe { libc::kill(-pgid, signal) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(unix)]
+fn group_quiescent(pgid: u32) -> std::io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        // The unreaped leader pins PGID throughout this scan. A zombie-only group
+        // is stopped; kill(-pgid, 0) cannot distinguish it from runnable members.
+        // Any unreadable, malformed, or incomplete scan fails closed.
+        let deadline = std::time::Instant::now() + Duration::from_millis(20);
+        let mut anchor_seen = false;
+        for (index, entry) in std::fs::read_dir("/proc")?.enumerate() {
+            if index >= 32_768 || std::time::Instant::now() >= deadline {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            let entry = entry?;
+            let Some(member_pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let bytes = match std::fs::read(entry.path().join("stat")) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            let end = bytes
+                .iter()
+                .rposition(|byte| *byte == b')')
+                .ok_or(std::io::ErrorKind::InvalidData)?;
+            let fields = std::str::from_utf8(&bytes[end + 1..])
+                .map_err(|_| std::io::ErrorKind::InvalidData)?;
+            let mut fields = fields.split_ascii_whitespace();
+            let state = fields.next().ok_or(std::io::ErrorKind::InvalidData)?;
+            let group: u32 = fields
+                .nth(1)
+                .ok_or(std::io::ErrorKind::InvalidData)?
+                .parse()
+                .map_err(|_| std::io::ErrorKind::InvalidData)?;
+            anchor_seen |= member_pid == pgid;
+            if group == pgid && !matches!(state, "Z" | "X") {
+                return Ok(false);
+            }
+        }
+        if !anchor_seen {
+            return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+        }
+        Ok(true)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pgid;
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+#[cfg(unix)]
+fn reap_pid(pid: u32) -> std::io::Result<()> {
+    let pid = i32::try_from(pid).map_err(|_| std::io::ErrorKind::InvalidInput)?;
+    loop {
+        // SAFETY: wait for exactly our direct child; status is intentionally unused.
+        if unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) } >= 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => {}
+            _ => return Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn observe_unreaped_exit(pid: u32) -> std::io::Result<()> {
+    let mut changes = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
+    loop {
+        // Register before checking, so a concurrent exit cannot lose its notification.
+        if exited_without_reaping(pid)? {
+            return Ok(());
+        }
+        changes.recv().await.ok_or(std::io::ErrorKind::BrokenPipe)?;
+    }
+}
+
+#[cfg(unix)]
+fn exited_without_reaping(pid: u32) -> std::io::Result<bool> {
+    loop {
+        // SAFETY: waitid initializes siginfo; WNOWAIT retains our child as the PGID anchor.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid,
+                &raw mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return Ok(unsafe { info.si_pid() } != 0);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn wait_group_grace(pgid: u32, grace: Duration) {
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        match group_quiescent(pgid) {
+            Ok(true) => return,
+            Err(_) => {
+                tokio::time::sleep_until(deadline).await;
+                return;
+            }
+            Ok(false) => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep_until(
+            deadline.min(tokio::time::Instant::now() + Duration::from_millis(5)),
+        )
+        .await;
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn group_absent(pgid: u32) -> std::io::Result<bool> {
+    let pgid = i32::try_from(pgid).map_err(|_| std::io::ErrorKind::InvalidInput)?;
+    if pgid <= 0 {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    // This read-only check occurs after the final signal and reap. A reused PGID
+    // can only make the result conservative; it is never signalled again.
+    if unsafe { libc::kill(-pgid, 0) } == 0 {
+        return Ok(false);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(true)
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(windows)]
+fn job_quiescent(job: Option<&JobHandle>) -> std::io::Result<bool> {
+    use windows_sys::Win32::System::JobObjects::{
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+        QueryInformationJobObject,
+    };
+    let job = job.ok_or(std::io::ErrorKind::Unsupported)?;
+    let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: the borrowed job handle stays live and the output buffer has the exact API layout.
+    if unsafe {
+        QueryInformationJobObject(
+            job.0 as windows_sys::Win32::Foundation::HANDLE,
+            JobObjectBasicAccountingInformation,
+            (&raw mut accounting).cast(),
+            u32::try_from(std::mem::size_of_val(&accounting))
+                .expect("Win32 accounting size fits u32"),
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(accounting.ActiveProcesses == 0)
+}
+
+async fn wait_stopped(mut check: impl FnMut() -> std::io::Result<bool>) -> std::io::Result<bool> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    loop {
+        if check()? {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+fn wait_stopped_blocking(
+    mut check: impl FnMut() -> std::io::Result<bool>,
+) -> std::io::Result<bool> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+    loop {
+        if check()? {
+            return Ok(true);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(windows)]
+fn terminate_job(job: &JobHandle) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+    // SAFETY: caller owns the live job handle for the duration of the call.
+    if unsafe { TerminateJobObject(job.0 as HANDLE, 1) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 impl ProcessProbe {
@@ -238,8 +720,8 @@ impl ProcessProbe {
     ///
     /// * Unix: the child is made its own process-group leader
     ///   (`process_group(0)`, so `pgid == child_pid`) and the cancel arm
-    ///   signals the whole group via the `kill(1)` tool with a negative pgid
-    ///   (`kill -s KILL -- -<pgid>`), mirroring `supervisor::replace`.
+    ///   signals the whole group with native `kill(2)`. An ownership guard
+    ///   performs forced cleanup and reaping when the runtime disappears.
     /// * Windows: the child is assigned to a Job Object at spawn and the
     ///   cancel arm calls `TerminateJobObject`, which kills every process in
     ///   the job (native Win32, no taskkill/powershell).
@@ -251,6 +733,23 @@ impl ProcessProbe {
         runtime: Arc<SifterRuntime>,
         sink: Arc<dyn EventSink>,
     ) -> Result<Self, ProcessProbeError> {
+        Self::spawn_with_environment(argv, config, rings, runtime, sink, EnvironmentMode::Inherit)
+    }
+
+    /// Spawn with an explicit environment policy. Clearing does not inject host
+    /// environment variables; callers supply any OS essentials in `config.env`.
+    #[allow(clippy::too_many_lines)]
+    pub fn spawn_with_environment(
+        argv: &[String],
+        config: &ProcessProbeConfig,
+        rings: Arc<ContextRingManager>,
+        runtime: Arc<SifterRuntime>,
+        sink: Arc<dyn EventSink>,
+        environment: EnvironmentMode,
+    ) -> Result<Self, ProcessProbeError> {
+        // Validate runtime before rings, governor preparation, or process creation.
+        let runtime_handle =
+            tokio::runtime::Handle::try_current().map_err(|_| ProcessProbeError::MissingRuntime)?;
         if argv.is_empty() {
             return Err(ProcessProbeError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -262,74 +761,57 @@ impl ProcessProbe {
             .create_ring_default(probe_id)
             .map_err(|e| ProcessProbeError::Io(std::io::Error::other(e.to_string())))?;
         let mut cmd = Command::new(&argv[0]);
-        terminal_commander_core::as_daemon_child(cmd.as_std_mut());
+        if environment == EnvironmentMode::Clear {
+            cmd.env_clear();
+        } else {
+            terminal_commander_core::as_daemon_child(cmd.as_std_mut());
+        }
         cmd.args(&argv[1..]);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         cmd.stdin(Stdio::null());
+        // OwnedProcess handles every drop path, including native reaping after runtime loss.
+        cmd.kill_on_drop(false);
         if let Some(cwd) = &config.cwd {
             cmd.current_dir(cwd);
         }
-        // OVERLAY semantics: the child inherits the daemon's full parent
-        // environment; each supplied `(key, value)` is ADDED to it (or
-        // overrides an existing entry). We deliberately do NOT `env_clear`:
-        // clearing it stripped OS-essential vars (e.g. `SystemRoot`, `PATH`
-        // on Windows) and crashed Windows children at startup whenever a
-        // non-empty env was supplied. An empty `config.env` leaves the
-        // loop a no-op, which is exactly "inherit the parent env" -- as a
-        // daemon child (`as_daemon_child` above).
-        for (k, v) in &config.env {
-            cmd.env(k, v);
+        for (key, value) in &config.env {
+            cmd.env(key, value);
         }
         #[cfg(unix)]
-        {
-            // Put the child in its OWN process group so its descendants share
-            // the group; the child becomes group leader, so `pgid == child_pid`.
-            // The cancel arm then signals the whole group via `kill -<pgid>`,
-            // reaping grandchildren that would otherwise orphan.
-            cmd.process_group(0);
-        }
+        cmd.process_group(0);
         #[cfg(windows)]
-        {
-            terminal_commander_core::windows_silent(cmd.as_std_mut());
-        }
-        // Resource governor (unix): mode decided BEFORE spawn so the rlimit
-        // and nice land in `pre_exec`. `None` for default limits: no syscall.
+        terminal_commander_core::windows_silent(cmd.as_std_mut());
+
         #[cfg(unix)]
         let mut unix_gov = crate::governor::UnixGovernor::prepare(&config.limits, probe_id);
         #[cfg(unix)]
         if let Some(gov) = &unix_gov {
-            // SAFETY: the hook only issues async-signal-safe syscalls
-            // (getrlimit/setrlimit/setpriority) on plain captured values; it
-            // allocates nothing and touches no lock between fork and exec.
+            // SAFETY: only async-signal-safe syscalls on precomputed values.
             unsafe {
                 cmd.pre_exec(gov.pre_exec_hook());
             }
         }
-        let mut child = cmd.spawn()?;
-        #[cfg(windows)]
-        let child_pid = child
-            .id()
-            .expect("tokio child has pid immediately after spawn");
-        // Unix: capture the child pid (== pgid, since it is the group leader)
-        // so the cancel arm can kill the whole group without racing the child.
-        #[cfg(unix)]
-        let child_pid = child
-            .id()
-            .expect("tokio child has pid immediately after spawn");
-        // Windows: assign the child to a fresh Job Object so the OS tears down
-        // the whole descendant tree on `TerminateJobObject` (cancel) or on
-        // handle close (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, Drop). `None` if
-        // the job could not be created/assigned -- the cancel path then falls
-        // back to a single-process kill (`start_kill`).
+        let child = cmd.spawn()?;
+        let child_pid = child.id().expect("child has pid immediately after spawn");
+        let metrics = Arc::new(Mutex::new(ProcessProbeMetrics::default()));
+        let mut owned = OwnedProcess {
+            child: Some(child),
+            child_pid,
+            metrics: Arc::clone(&metrics),
+            #[cfg(windows)]
+            job: None,
+            armed: true,
+            signal_cleanup: None,
+        };
         #[cfg(windows)]
         let (job, governor, limit_watch) = {
             let (job, report, watch) =
-                crate::governor::govern_child(child.raw_handle(), &config.limits);
-            (job.map(Arc::new), report, watch)
+                crate::governor::govern_child(owned.child_mut().raw_handle(), &config.limits);
+            let job = job.map(Arc::new);
+            owned.job.clone_from(&job);
+            (job, report, watch)
         };
-        // Unix: verify the cgroup move the child made in `pre_exec` (see
-        // governor.rs) and keep the report handle.
         #[cfg(unix)]
         let governor = unix_gov.as_mut().map_or_else(
             || Arc::new(Mutex::new(GovernorReport::default())),
@@ -340,31 +822,45 @@ impl ProcessProbe {
         );
         #[cfg(windows)]
         let governor_for_task = Arc::clone(&governor);
+        #[cfg(target_os = "linux")]
+        let cpu_sampler = crate::job_cpu::JobCpuSampler::new(
+            probe_id,
+            child_pid,
+            unix_gov
+                .as_ref()
+                .and_then(crate::governor::UnixGovernor::cgroup_path),
+        );
+        #[cfg(windows)]
+        let cpu_sampler = crate::job_cpu::JobCpuSampler::new(probe_id, child_pid, job.as_ref());
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let cpu_sampler = crate::job_cpu::JobCpuSampler::new(probe_id, child_pid);
+        let cpu_sampler = Arc::new(Mutex::new(cpu_sampler));
 
-        let stdout = child.stdout.take().expect("piped stdout configured above");
-        let stderr = child.stderr.take().expect("piped stderr configured above");
-
-        let metrics = Arc::new(Mutex::new(ProcessProbeMetrics::default()));
+        let identity = ProcessIdentity {
+            probe_id,
+            child_pid,
+            process_group_id: if cfg!(unix) { Some(child_pid) } else { None },
+            #[cfg(unix)]
+            ownership: ProcessOwnership::UnixProcessGroup,
+            #[cfg(windows)]
+            ownership: if job.is_some() {
+                ProcessOwnership::WindowsJobObject
+            } else {
+                ProcessOwnership::LeaderOnly
+            },
+            #[cfg(not(any(unix, windows)))]
+            ownership: ProcessOwnership::LeaderOnly,
+        };
+        let stdout = owned.child_mut().stdout.take().expect("piped stdout");
+        let stderr = owned.child_mut().stderr.take().expect("piped stderr");
         let metrics_for_task = Arc::clone(&metrics);
         let noise_pipeline: SharedProbeNoisePipeline =
             Arc::new(Mutex::new(ProbeNoisePipeline::with_default_policy()));
         let bucket_id = config.bucket_id;
-        // TC-B1: snapshot the strip flag before the config borrow ends; the
-        // read tasks own it for the life of the probe.
         let strip_ansi = config.strip_ansi;
-        // US3b (T042): snapshot the grace window before the borrow ends; the
-        // cancel arm waits out a SIGTERM for this long before escalating to
-        // SIGKILL.
         let grace = config.grace;
-
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
-
-        // Move a clone of the job handle (Windows) / the captured pgid (Unix)
-        // into the lifecycle task so its cancel arm can tear down the tree.
-        #[cfg(windows)]
-        let job_for_task = job.clone();
-
-        let join = tokio::spawn(async move {
+        let join = runtime_handle.spawn(async move {
             let stdout_task = read_stream(
                 stdout,
                 probe_id,
@@ -385,56 +881,86 @@ impl ProcessProbe {
                 rings,
                 runtime,
                 sink,
-                metrics_for_task,
+                Arc::clone(&metrics_for_task),
                 noise_pipeline,
                 strip_ansi,
             );
             let drain = async {
-                let _ = tokio::join!(stdout_task, stderr_task);
+                tokio::join!(stdout_task, stderr_task);
             };
-
-            let result = tokio::select! {
-                () = drain => child.wait().await.map_err(ProcessProbeError::Io),
-                _ = &mut cancel_rx => {
-                    // Grace ladder (T042/FR-015): SIGTERM the tree, wait up to
-                    // `grace` for a cooperative exit, then escalate to SIGKILL.
-                    // On Windows the forced TerminateJobObject is the only step
-                    // (no SIGTERM equivalent -- see the helper's doc comment).
-                    terminate_process_tree_graceful(
-                        &mut child,
-                        grace,
-                        #[cfg(unix)] child_pid,
-                        #[cfg(windows)] job_for_task.as_deref(),
-                    )
-                    .await;
-                    Err(ProcessProbeError::Cancelled)
+            tokio::pin!(drain);
+            let mut drained = false;
+            let mut cancelled = false;
+            // Observe the leader independently of pipe EOF. A descendant retaining
+            // stdout cannot hide the leader's exit indefinitely.
+            loop {
+                tokio::select! {
+                    () = &mut drain, if !drained => { drained = true; }
+                    status = owned.observe_exit() => {
+                        status.map_err(ProcessProbeError::Io)?;
+                        break;
+                    }
+                    _ = &mut cancel_rx => {
+                        cancelled = true;
+                        #[cfg(unix)]
+                        owned.graceful_stop(grace).await;
+                        break;
+                    }
                 }
-            };
-            // Resource governor: peak + limit-hit from the enforcing object.
+            }
+            if !drained && !cancelled {
+                // Keep the Unix leader unreaped while descendants retain the pipes.
+                drained = tokio::time::timeout(grace, &mut drain).await.is_ok();
+            }
+            let (status, cleanup) = owned.finish().await.map_err(ProcessProbeError::Io)?;
+            if !drained {
+                // Closing a group/job should release pipes immediately; still bound
+                // escaped descendants instead of allowing them to hang completion.
+                drained = tokio::time::timeout(Duration::from_millis(100), &mut drain)
+                    .await
+                    .is_ok();
+            }
+            let mut snapshot = metrics_for_task.lock();
+            if !drained {
+                finish_observation(
+                    &mut snapshot,
+                    if cancelled {
+                        ObservationIncompleteReason::Cancelled
+                    } else {
+                        ObservationIncompleteReason::DrainTimeout
+                    },
+                );
+            }
+            snapshot.cleanup = cleanup;
+            let observation = snapshot.observation;
+            drop(snapshot);
             #[cfg(windows)]
             crate::governor::finish_job(
                 &governor_for_task,
-                job_for_task.as_deref(),
+                owned.job.as_deref(),
                 limit_watch,
-                !matches!(&result, Ok(st) if st.success()),
+                cancelled || !status.success(),
             );
             #[cfg(unix)]
             if let Some(gov) = unix_gov {
-                gov.finish(!matches!(&result, Ok(st) if st.success()));
+                gov.finish(cancelled || !status.success());
             }
-            result
+            Ok(ProcessProbeReport {
+                exit_status: status,
+                cancelled,
+                observation,
+                cleanup,
+            })
         });
-
         Ok(Self {
             probe_id,
             metrics,
             cancel_tx: Some(cancel_tx),
             join: Some(join),
-            #[cfg(windows)]
-            child_pid,
-            #[cfg(windows)]
-            _job: job,
+            identity,
+            cpu_sampler,
             governor,
+            report: None,
         })
     }
 
@@ -445,11 +971,10 @@ impl ProcessProbe {
         self.governor.lock().clone()
     }
 
-    /// Windows child PID for AttachConsole regression tests.
-    #[cfg(windows)]
+    /// Portable leader PID; use `identity` for the process-group/ownership scope.
     #[must_use]
     pub const fn child_pid(&self) -> u32 {
-        self.child_pid
+        self.identity.child_pid
     }
 
     /// Probe identifier.
@@ -489,161 +1014,80 @@ impl ProcessProbe {
         self.cancel_tx.take()
     }
 
-    /// Await natural exit. Returns the child exit status on success;
-    /// `Cancelled` if `cancel` was called before exit.
     pub async fn wait(&mut self) -> Result<std::process::ExitStatus, ProcessProbeError> {
-        let Some(handle) = self.join.take() else {
-            return Err(ProcessProbeError::Cancelled);
-        };
-        match handle.await {
-            Ok(r) => r,
-            Err(e) => Err(ProcessProbeError::Io(std::io::Error::other(e.to_string()))),
+        let report = self.wait_report().await?;
+        if report.cancelled {
+            Err(ProcessProbeError::Cancelled)
+        } else {
+            Ok(report.exit_status)
         }
+    }
+
+    /// Cancellation-safe wait retaining both child exit and pipe observation.
+    /// Dropping this future does not detach the lifecycle task from its owner.
+    pub async fn wait_report(&mut self) -> Result<ProcessProbeReport, ProcessProbeError> {
+        if let Some(report) = &self.report {
+            return Ok(report.clone());
+        }
+        let handle = self.join.as_mut().ok_or(ProcessProbeError::Cancelled)?;
+        let result = handle.await;
+        self.join.take();
+        let report =
+            result.map_err(|e| ProcessProbeError::Io(std::io::Error::other(e.to_string())))??;
+        self.report = Some(report.clone());
+        Ok(report)
+    }
+
+    #[must_use]
+    pub const fn identity(&self) -> ProcessIdentity {
+        self.identity
+    }
+
+    #[must_use]
+    pub fn observation(&self) -> ProcessObservation {
+        self.metrics.lock().observation
+    }
+
+    #[must_use]
+    pub fn cpu_sample(&self) -> crate::job_cpu::JobCpuSample {
+        self.cpu_sampler.lock().sample()
+    }
+
+    #[must_use]
+    pub fn cpu_sampler_handle(&self) -> Arc<Mutex<crate::job_cpu::JobCpuSampler>> {
+        Arc::clone(&self.cpu_sampler)
     }
 }
 
-/// Grace-ladder cancel (US3b / T042 / FR-015): attempt a GRACEFUL terminate,
-/// wait up to `grace` for the child to exit on its own, and only then escalate
-/// to the FORCED [`kill_process_tree`]. Returns once the child has been reaped.
-///
-/// Platform semantics -- the contract is "graceful-then-forced", but the
-/// graceful step is necessarily asymmetric:
-///
-/// * Unix: send `SIGTERM` to the child's whole PROCESS GROUP (`kill -s TERM --
-///   -<pgid>`), the same negative-pgid form `kill_process_tree` uses for
-///   `SIGKILL` (see that function for why `-s SIG -- ` is required over the
-///   `-SIG` flag form). A well-behaved program runs its cleanup and exits; the
-///   grace window then observes the exit and NO `SIGKILL` is sent. A program
-///   that ignores `SIGTERM` is escalated to the process-group `SIGKILL` once
-///   `grace` elapses.
-/// * Windows: there is NO `SIGTERM` equivalent for a Job Object -- the OS has
-///   no "post a graceful close to every process in the job" primitive (console
-///   `CTRL_*` events do not reach a GUI-subsystem daemon's job, and Job Objects
-///   have no `WM_CLOSE` fan-out). The forced `TerminateJobObject` is therefore
-///   both the graceful and the forced step; the asymmetry is intentional and
-///   documented. The grace window is skipped on Windows because there is no
-///   softer signal to wait out.
-/// `pub(crate)` so the unix PTY probe in `pty.rs` shares this exact
-/// grace-ladder contract; the Windows signature references the crate-private
-/// `JobHandle`, which is also `pub(crate)`.
+#[cfg(unix)]
 pub(crate) async fn terminate_process_tree_graceful(
     child: &mut tokio::process::Child,
     grace: Duration,
-    #[cfg(unix)] pgid: u32,
-    #[cfg(windows)] job: Option<&JobHandle>,
+    pgid: u32,
 ) {
-    #[cfg(unix)]
-    {
-        // Graceful step: SIGTERM the whole group. Best-effort, mirroring the
-        // SIGKILL path's stdio silencing and ignored status. If `kill` is
-        // absent the child simply never gets the graceful signal and the
-        // escalation below still reaps it via `start_kill`.
-        let _ = terminal_commander_core::as_daemon_child(&mut std::process::Command::new("kill"))
-            .args(["-s", "TERM", "--", &format!("-{pgid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-
-        // Wait up to `grace` for a cooperative exit. A child that handles
-        // SIGTERM and exits within the window is reaped HERE -- no SIGKILL is
-        // ever sent. `child.wait()` reaps the direct child (the group leader);
-        // its descendants, if any, share the group and received the same
-        // SIGTERM.
-        if tokio::time::timeout(grace, child.wait()).await.is_err() {
-            // Grace expired with no cooperative exit: escalate to the forced
-            // process-group SIGKILL, then reap. A cooperative exit inside the
-            // window (the `Ok` case) needs no further action.
-            kill_process_tree(child, pgid);
-            let _ = child.wait().await;
-        }
+    // PTY caller also retains the unreaped leader until every group signal is done.
+    if child.id() != Some(pgid) || exited_without_reaping(pgid).is_err() {
+        return;
     }
-    #[cfg(windows)]
-    {
-        // No graceful Job-Object signal exists (see the doc comment). The
-        // `grace` window is meaningless without a softer signal to wait out,
-        // so go straight to the forced terminate. `_ = grace` keeps the
-        // cross-platform signature honest without an unused-var warning.
-        let _ = grace;
-        kill_process_tree(child, job);
-        let _ = child.wait().await;
-    }
-    // Platforms with neither cfg: best-effort single-process kill, no grace.
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = grace;
-        kill_process_tree(child);
-        let _ = child.wait().await;
-    }
+    let _ = signal_process_group(pgid, libc::SIGTERM);
+    wait_group_grace(pgid, grace).await;
+    let _ = signal_process_group(pgid, libc::SIGKILL);
+    let _ = child.start_kill();
+    let _ = child.wait().await;
 }
 
-/// Tear down the cancelled child's WHOLE process tree (best-effort), then let
-/// the caller `wait()` to reap the direct child.
-///
-/// * Unix: signals the child's process group via the `kill(1)` tool with a
-///   negative pgid (`kill -s KILL -- -<pgid>`), reaping grandchildren, then
-///   issues `start_kill` on the leader as a belt-and-suspenders fallback (also
-///   covers the case where `kill` is absent). Mirrors `supervisor::replace`'s
-///   use of the `kill` tool (no `libc`). See the in-body note for why the
-///   `-s KILL -- ` form is required over the `-KILL` flag form.
-/// * Windows: terminates the Job Object (`TerminateJobObject`), killing every
-///   process in the job = the tree, with `start_kill` as a fallback when the
-///   job handle is unavailable.
-fn kill_process_tree(
-    child: &mut tokio::process::Child,
-    #[cfg(unix)] pgid: u32,
-    #[cfg(windows)] job: Option<&JobHandle>,
-) {
-    #[cfg(unix)]
-    {
-        // Signal the whole group: a LEADING MINUS on the target makes `kill`
-        // signal the process group (`-<pgid>`), so descendants sharing the
-        // group die too. We use the `-s KILL -- -<pgid>` form deliberately:
-        //
-        //   * `-s KILL` names the signal as a separate argument instead of the
-        //     `-KILL` flag form. Empirically, procps-ng `kill` (observed on
-        //     WSL2, procps-ng 4.0.4, kernel 6.6.x) MIS-PARSES the combined
-        //     `kill -KILL -<pgid>` form and delivers SIGKILL to the CALLER's
-        //     process group instead of the target group -- which would kill the
-        //     daemon itself. The `-s KILL` + `--` form parses unambiguously and
-        //     was verified to (a) reap the target group's grandchildren and
-        //     (b) leave the caller alive.
-        //   * `--` terminates option parsing so the negative `-<pgid>` target is
-        //     never treated as a flag.
-        //
-        // Best-effort like the supervisor's hard kill: stdio is silenced and
-        // the exit status is ignored. If `kill` is somehow absent (Err), the
-        // `start_kill` below still reaps the leader.
-        let _ = terminal_commander_core::as_daemon_child(&mut std::process::Command::new("kill"))
-            .args(["-s", "KILL", "--", &format!("-{pgid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        // Belt-and-suspenders: SIGKILL the leader directly as well.
-        let _ = child.start_kill();
-    }
-    #[cfg(windows)]
-    {
-        // SAFETY: `handle` is a live Job Object handle created by
-        // `CreateJobObjectW` and owned by `JobHandle` for the duration of this
-        // borrow. `TerminateJobObject` only reads the handle and posts the exit
-        // code to every process in the job; the BOOL result is best-effort and
-        // intentionally ignored (the `start_kill` fallback below covers it).
-        if let Some(job) = job {
-            use windows_sys::Win32::Foundation::HANDLE;
-            use windows_sys::Win32::System::JobObjects::TerminateJobObject;
-            unsafe {
-                let _ = TerminateJobObject(job.0 as HANDLE, 1);
+fn cleanup_from_proof(signalled: ProcessCleanup, stopped: std::io::Result<bool>) -> ProcessCleanup {
+    match stopped {
+        Ok(true) => ProcessCleanup::Complete,
+        Err(error) => ProcessCleanup::Uncertain {
+            raw_os_error: error.raw_os_error(),
+        },
+        Ok(false) => match signalled {
+            ProcessCleanup::Uncertain { raw_os_error } => {
+                ProcessCleanup::Uncertain { raw_os_error }
             }
-        } else {
-            // No job (creation failed at spawn): fall back to killing just the
-            // direct child. Grandchildren may orphan in this degraded path.
-            let _ = child.start_kill();
-        }
-    }
-    // Platforms with neither cfg: best-effort single-process kill.
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = child.start_kill();
+            _ => ProcessCleanup::Uncertain { raw_os_error: None },
+        },
     }
 }
 
@@ -747,14 +1191,16 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     // the first chunk and this adds no cost. Mirrors the strip_ansi seam: a
     // small focused decoder wired at the read boundary, one layer earlier
     // because the encoding decides how bytes group into lines.
+    let stream = ObservedReader {
+        inner: stream,
+        kind: kind.clone(),
+        metrics: Arc::clone(&metrics),
+    };
     let mut reader = BufReader::new(crate::utf16::Utf16Decoder::new(stream));
     let mut line_no: u64 = 0;
     loop {
-        // `read_line_bounded` returns raw bytes and so never errors on
-        // non-UTF-8; the only `Err` is a genuine pipe/IO failure (the child
-        // closed the stream or died mid-read). Clean EOF (`Ok(None)`) and an
-        // IO error both mean nothing remains to capture, so we stop. The key
-        // change: invalid UTF-8 is NO LONGER an end-of-capture condition.
+        // Invalid UTF-8 does not end capture. Pipe errors and EOF stop framing;
+        // ObservedReader records their distinct typed terminal states first.
         let Ok(Some(LineRead {
             bytes: raw,
             dropped,
@@ -763,7 +1209,6 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
             break;
         };
         line_no = line_no.saturating_add(1);
-        let bytes = raw.len() as u64;
         // Lossy decode preserves capture on non-UTF-8 streams: invalid byte
         // sequences become U+FFFD replacement chars rather than terminating
         // the loop. The replacement chars ARE the lossy signal; downstream
@@ -800,7 +1245,6 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
                 }
                 _ => {}
             }
-            m.bytes_total = m.bytes_total.saturating_add(bytes);
             m.last_frame_at = Some(std::time::Instant::now());
         }
 
@@ -842,7 +1286,57 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     }
 }
 
-/// Maximum bytes retained for a single logical line before it is force-split.
+#[cfg(all(test, unix))]
+mod ownership_cleanup_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    #[tokio::test]
+    async fn signal_delivery_does_not_claim_cleanup_before_leader_reap() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "echo READY; exec sleep 60"])
+            .process_group(0)
+            .stdout(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let child_pid = child.id().unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .await
+            .unwrap();
+        assert_eq!(line.trim(), "READY");
+        let mut owned = OwnedProcess {
+            child: Some(child),
+            child_pid,
+            metrics: Arc::new(Mutex::new(ProcessProbeMetrics::default())),
+            armed: true,
+            signal_cleanup: None,
+        };
+        let cleanup = owned.kill_tree();
+        assert_eq!(
+            cleanup,
+            ProcessCleanup::Reaping,
+            "delivered SIGKILL alone does not prove leader reap or group termination"
+        );
+        let failed_proof =
+            wait_stopped(|| Err(std::io::Error::from_raw_os_error(libc::EACCES))).await;
+        assert_eq!(
+            cleanup_from_proof(cleanup, failed_proof),
+            ProcessCleanup::Uncertain {
+                raw_os_error: Some(libc::EACCES),
+            }
+        );
+        owned.child_mut().wait().await.unwrap();
+        // An invalid sentinel makes any repeated native group signal fail safely;
+        // the cached result proves cleanup never signals again after leader reap.
+        owned.child_pid = u32::MAX;
+        assert_eq!(owned.kill_tree(), cleanup);
+        owned.armed = false;
+    }
+}
+
+/// Maximum bytes retained for a single logical line before overflow is discarded.
 ///
 /// A newline-less stream (a stuck progress bar, `cat` of a minified blob, a
 /// hung tool emitting megabytes with no `\n`) must never grow the read buffer
@@ -912,6 +1406,76 @@ fn accumulate(buf: &mut Vec<u8>, dropped: &mut u64, more: &[u8]) {
     } else {
         buf.extend_from_slice(&more[..room]);
         *dropped = dropped.saturating_add((more.len() - room) as u64);
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+
+    struct FailAfterBytes {
+        sent: bool,
+    }
+
+    impl AsyncRead for FailAfterBytes {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.sent {
+                Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "untrusted pipe error text",
+                )))
+            } else {
+                self.sent = true;
+                buf.put_slice(b"partial");
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn read_failure_after_partial_bytes_preserves_typed_stream_failure() {
+        for kind in [SourceStream::Stdout, SourceStream::Stderr] {
+            let metrics = Arc::new(Mutex::new(ProcessProbeMetrics::default()));
+            let probe_id = ProbeId::new();
+            let rings = Arc::new(ContextRingManager::new());
+            rings.create_ring_default(probe_id).unwrap();
+            read_stream(
+                FailAfterBytes { sent: false },
+                probe_id,
+                kind.clone(),
+                BucketId::new(),
+                rings,
+                Arc::new(SifterRuntime::build(&[]).unwrap()),
+                Arc::new(InMemorySink::new()),
+                Arc::clone(&metrics),
+                Arc::new(Mutex::new(ProbeNoisePipeline::with_default_policy())),
+                true,
+            )
+            .await;
+            let metrics = metrics.lock();
+            assert_eq!(metrics.bytes_total, 7);
+            assert!(metrics.last_output_at.is_some());
+            assert_eq!(metrics.frames_total, 0);
+            let stream = if kind == SourceStream::Stdout {
+                metrics.observation.stdout
+            } else {
+                metrics.observation.stderr
+            };
+            assert_eq!(stream.bytes_total, 7);
+            assert_eq!(
+                stream.state,
+                StreamObservationState::Failed(PipeReadFailure {
+                    kind: PipeReadErrorKind::ConnectionReset,
+                    raw_os_error: None,
+                })
+            );
+            assert!(!metrics.observation.is_complete());
+            assert!(!format!("{:?}", metrics.observation).contains("untrusted"));
+        }
     }
 }
 

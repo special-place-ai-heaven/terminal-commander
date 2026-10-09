@@ -434,7 +434,75 @@ pub(in crate::ipc::server) async fn handle_credential_provide(
     params: &CredentialProvideParams,
     peer: &PeerIdentity,
 ) -> Result<IpcResponse, IpcError> {
-    if !super::recipe::caller_is_owner_cli(state, peer, params.from_mcp) {
+    provide_owner_credential(
+        state,
+        params.job_id,
+        &params.secret,
+        peer,
+        params.from_mcp,
+        if params.interactive {
+            "cli-tty"
+        } else {
+            "cli-stdin"
+        },
+        None,
+    )
+    .await
+}
+
+#[cfg(any(unix, windows))]
+pub(in crate::ipc::server) async fn handle_credential_provide_challenge(
+    state: &Arc<DaemonState>,
+    params: &terminal_commander_ipc::protocol::CredentialProvideChallengeParams,
+    peer: &PeerIdentity,
+) -> Result<IpcResponse, IpcError> {
+    // Reject before consulting the challenge so untrusted callers do not gain
+    // an oracle for engine or prompt identity.
+    if !super::recipe::caller_is_owner_cli(state, peer, false) {
+        return Err(IpcError::new(
+            IpcErrorCode::PolicyDenied,
+            "credential_provide_requires_owner",
+        ));
+    }
+    if params.challenge.instance_id != state.boot_id.to_string() {
+        return Err(IpcError::new(
+            IpcErrorCode::UnknownJob,
+            "credential challenge belongs to another engine instance",
+        ));
+    }
+    provide_owner_credential(
+        state,
+        params.challenge.job_id,
+        &params.secret,
+        peer,
+        false,
+        "embedded-owner",
+        Some(params.challenge.prompt_generation),
+    )
+    .await
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(in crate::ipc::server) async fn handle_credential_provide_challenge(
+    _state: &Arc<DaemonState>,
+    _params: &terminal_commander_ipc::protocol::CredentialProvideChallengeParams,
+    _peer: &PeerIdentity,
+) -> Result<IpcResponse, IpcError> {
+    Err(pty_ipc_unsupported())
+}
+
+#[cfg(any(unix, windows))]
+#[allow(clippy::literal_string_with_formatting_args)] // Preserve the public MCP argument placeholder.
+async fn provide_owner_credential(
+    state: &Arc<DaemonState>,
+    job_id: terminal_commander_core::JobId,
+    secret: &terminal_commander_ipc::OwnerSecret,
+    peer: &PeerIdentity,
+    from_mcp: bool,
+    channel: &'static str,
+    generation: Option<u64>,
+) -> Result<IpcResponse, IpcError> {
+    if !super::recipe::caller_is_owner_cli(state, peer, from_mcp) {
         return Err(IpcError::new(
             IpcErrorCode::PolicyDenied,
             "credential_provide_requires_owner: only the owner's admin CLI \
@@ -443,7 +511,7 @@ pub(in crate::ipc::server) async fn handle_credential_provide(
              {job_id} and the owner is asked directly.",
         ));
     }
-    if params.secret.as_bytes().len() >= MAX_PTY_STDIN_BYTES {
+    if secret.as_bytes().len() >= MAX_PTY_STDIN_BYTES {
         return Err(IpcError::new(
             IpcErrorCode::OversizedRequest,
             format!("password exceeds the {MAX_PTY_STDIN_BYTES}-byte PTY stdin cap"),
@@ -451,24 +519,13 @@ pub(in crate::ipc::server) async fn handle_credential_provide(
     }
     match state
         .pty
-        .deliver_credential(
-            params.job_id,
-            params.secret.as_bytes(),
-            None,
-            if params.interactive {
-                "cli-tty"
-            } else {
-                "cli-stdin"
-            },
-        )
+        .deliver_credential(job_id, secret.as_bytes(), generation, channel)
         .await
     {
         Ok(generation) => {
-            state.credentials.record_provided(params.job_id, generation);
+            state.credentials.record_provided(job_id, generation);
             Ok(IpcResponse::CredentialProvide(
-                crate::ipc::protocol::CredentialProvideResponse {
-                    job_id: params.job_id,
-                },
+                crate::ipc::protocol::CredentialProvideResponse { job_id },
             ))
         }
         Err(crate::pty_command::PtyRuntimeError::UnknownJob(id)) => Err(pty_job_not_live(id)),

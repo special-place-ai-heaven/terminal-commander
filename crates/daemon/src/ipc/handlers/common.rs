@@ -288,6 +288,7 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
         CommandError::InvalidLimits(msg) => {
             IpcError::new(IpcErrorCode::ArgvInvalid, format!("invalid limits: {msg}"))
         }
+        CommandError::InvalidIsolation(reason) => IpcError::new(IpcErrorCode::ArgvInvalid, reason),
         CommandError::UnknownJob(id) => {
             IpcError::new(IpcErrorCode::UnknownJob, format!("unknown job: {id}"))
         }

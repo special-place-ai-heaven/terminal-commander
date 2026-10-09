@@ -250,10 +250,9 @@ can follow. A path that merely exists is not advertised as executable, and
 failed or timed-out probes remain explicit evidence. Every concrete call is
 still rechecked with its real argv and cwd.
 
-In-process embedders construct `DaemonState` with `DaemonState::bootstrap` and
-call `DaemonState::discover_environment`; IPC discovery uses that same method,
-so embedded and daemon clients receive identical capability filtering without
-opening a socket.
+In-process embedders construct `embedded::EmbeddedEngine` and call its typed
+`system_discover` method. It uses the same dispatcher and capability-filtered
+discovery as IPC, without opening a socket.
 
 ### Self-healing daemon transport
 
@@ -486,10 +485,12 @@ rejected; `ensure_daemon` may spawn a fresh session daemon instead.
 ### In-process embedding
 
 Host applications can depend on the `terminal-commanderd` library and build the
-full engine with `DaemonState::bootstrap` without starting IPC, MCP, or the CLI.
+full engine with `embedded::EmbeddedEngine::bootstrap` without starting IPC, MCP, or the CLI.
 The [embedding guide](docs/EMBEDDING.md) documents the exact boundary, the
-capability-filtered discovery API, direct command path, OS restrictions, and
-revision-pinning requirement.
+complete typed method surface, explicit isolated commands, identity and lifecycle
+contracts, OS restrictions, and revision-pinning requirement. See the
+[parity matrix](docs/embedding/PARITY.md) and
+[migration from 0.1.86](docs/embedding/MIGRATION-0.1.86.md).
 
 ## The Life Of A Command
 

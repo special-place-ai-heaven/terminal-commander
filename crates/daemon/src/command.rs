@@ -367,6 +367,66 @@ pub enum CommandError {
     /// The request's `limits` could not be parsed or resolved.
     #[error("invalid limits: {0}")]
     InvalidLimits(String),
+    #[error("invalid isolated command: {0}")]
+    InvalidIsolation(&'static str),
+}
+
+fn validate_isolated_command(req: &CommandStartRequest) -> Result<(), CommandError> {
+    use crate::ipc::protocol::{
+        MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_INLINE_RULES, MAX_REQUEST_BYTES,
+    };
+    let invalid = CommandError::InvalidIsolation;
+    if !req
+        .argv
+        .first()
+        .is_some_and(|program| std::path::Path::new(program).is_absolute())
+    {
+        return Err(invalid("an absolute executable is required"));
+    }
+    let Some(cwd) = req
+        .cwd
+        .as_ref()
+        .filter(|path| path.is_absolute() && path.is_dir())
+    else {
+        return Err(invalid(
+            "an existing absolute working directory is required",
+        ));
+    };
+    if req.env.len() > MAX_COMMAND_ENV_ITEMS || req.rules.len() > MAX_COMMAND_INLINE_RULES {
+        return Err(invalid("environment or rule count exceeds limit"));
+    }
+    let mut bytes = cwd.as_os_str().len();
+    let mut keys = std::collections::HashSet::new();
+    for arg in &req.argv {
+        if arg.contains('\0') {
+            return Err(invalid("argv contains a NUL byte"));
+        }
+        bytes = bytes.saturating_add(arg.len());
+    }
+    for (key, value) in &req.env {
+        if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
+            return Err(invalid("invalid environment entry"));
+        }
+        if key.len() > MAX_ARGV_ITEM_BYTES || value.len() > MAX_ARGV_ITEM_BYTES {
+            return Err(invalid("environment entry exceeds byte limit"));
+        }
+        let normalized = if cfg!(windows) {
+            key.to_ascii_uppercase()
+        } else {
+            key.clone()
+        };
+        if normalized == terminal_commander_core::DAEMON_CHILD_ENV && value != "1" {
+            return Err(invalid("TC_DAEMON_CHILD is reserved and must be 1"));
+        }
+        if !keys.insert(normalized) {
+            return Err(invalid("duplicate environment key"));
+        }
+        bytes = bytes.saturating_add(key.len()).saturating_add(value.len());
+    }
+    if bytes > MAX_REQUEST_BYTES {
+        return Err(invalid("request exceeds byte limit"));
+    }
+    Ok(())
 }
 
 /// Which lane started this combed job, threaded through
@@ -392,7 +452,7 @@ enum StartLane<'a> {
 
 /// `command_start_combed` request shape. Plain Rust struct today;
 /// the rmcp / IPC adapter at TC41 wraps it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CommandStartRequest {
     /// Non-empty argv. `argv[0]` is the program; the rest are
     /// passed verbatim. Shell-string passthrough is forbidden.
@@ -441,6 +501,16 @@ pub struct CommandStartRequest {
     /// `[governor]` default; resolved and clamped in `start_combed_inner`.
     #[serde(default)]
     pub limits: Option<terminal_commander_ipc::JobLimitsSpec>,
+}
+
+impl std::fmt::Debug for CommandStartRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandStartRequest")
+            .field("argv_items", &self.argv.len())
+            .field("env_items", &self.env.len())
+            .field("cwd", &self.cwd)
+            .finish_non_exhaustive()
+    }
 }
 
 // `CommandStartResponse`, `CommandReceipt`, and `CommandStatusResponse`
@@ -499,6 +569,8 @@ impl EventSink for DaemonEventSink {
 /// `start_combed` time (TC42b).
 #[derive(Debug)]
 struct JobBinding {
+    process_identity: terminal_commander_core::ProcessIdentity,
+    cpu_sampler: Arc<parking_lot::Mutex<terminal_commander_probes::job_cpu::JobCpuSampler>>,
     metrics: ProcessProbeMetrics,
     sifter: Arc<terminal_commander_sifters::SifterRuntime>,
     inline_rules: Vec<terminal_commander_core::RuleDefinition>,
@@ -877,7 +949,30 @@ impl CommandRuntime {
         &self,
         req: CommandStartRequest,
     ) -> Result<CommandStartResponse, CommandError> {
-        self.start_combed_inner(req, None, StartLane::Argv)
+        self.start_combed_with_environment(req, terminal_commander_core::EnvironmentMode::Inherit)
+    }
+
+    /// Explicit opt-in to an environment-cleared spawn through the shared runtime.
+    /// Clear mode requires an absolute executable and existing absolute cwd.
+    /// The reserved `TC_DAEMON_CHILD=1` marker prevents login-shell autostart;
+    /// all application environment entries remain explicit.
+    pub fn start_combed_with_environment(
+        &self,
+        mut req: CommandStartRequest,
+        environment: terminal_commander_core::EnvironmentMode,
+    ) -> Result<CommandStartResponse, CommandError> {
+        if environment == terminal_commander_core::EnvironmentMode::Clear {
+            validate_isolated_command(&req)?;
+            if !req.env.iter().any(|(key, _)| {
+                key == terminal_commander_core::DAEMON_CHILD_ENV
+                    || (cfg!(windows)
+                        && key.eq_ignore_ascii_case(terminal_commander_core::DAEMON_CHILD_ENV))
+            }) {
+                req.env
+                    .push((terminal_commander_core::DAEMON_CHILD_ENV.into(), "1".into()));
+            }
+        }
+        self.start_combed_inner(req, None, StartLane::Argv, environment)
     }
 
     /// TC-5 self-check spawn entry point. Like [`Self::start_combed`]
@@ -894,7 +989,12 @@ impl CommandRuntime {
         req: CommandStartRequest,
         reuse_bucket: Option<BucketId>,
     ) -> Result<CommandStartResponse, CommandError> {
-        self.start_combed_inner(req, reuse_bucket, StartLane::Argv)
+        self.start_combed_inner(
+            req,
+            reuse_bucket,
+            StartLane::Argv,
+            terminal_commander_core::EnvironmentMode::Inherit,
+        )
     }
 
     /// TC49 shell-lane entry point. The single public seam into
@@ -917,7 +1017,12 @@ impl CommandRuntime {
         shell_line: &str,
         shell: &str,
     ) -> Result<CommandStartResponse, CommandError> {
-        self.start_combed_inner(req, None, StartLane::Shell { shell_line, shell })
+        self.start_combed_inner(
+            req,
+            None,
+            StartLane::Shell { shell_line, shell },
+            terminal_commander_core::EnvironmentMode::Inherit,
+        )
     }
 
     /// Shared `command_start_combed` engine. `reuse_bucket` is `None` for
@@ -934,6 +1039,7 @@ impl CommandRuntime {
         req: CommandStartRequest,
         reuse_bucket: Option<BucketId>,
         mode: StartLane<'_>,
+        environment: terminal_commander_core::EnvironmentMode,
     ) -> Result<CommandStartResponse, CommandError> {
         Self::validate_argv(&req.argv)?;
         let resolved_limits = self
@@ -955,7 +1061,13 @@ impl CommandRuntime {
         // evicted on completion); a nonce-less fallback hit is honored
         // only within the TTL window. probe_id is stored in the entry so
         // the duplicate response is identical to the original.
-        let (dedup_k, fallback_gated) = dedup_key(&req);
+        let (mut dedup_k, fallback_gated) = dedup_key(&req);
+        if environment == terminal_commander_core::EnvironmentMode::Clear {
+            use std::hash::{Hash, Hasher};
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            ("isolated", dedup_k, &req.argv, &req.cwd, &req.env).hash(&mut hash);
+            dedup_k = hash.finish();
+        }
         {
             let mut map = self.dedup.lock();
             if let Some(entry) = map.get(&dedup_k).cloned() {
@@ -1321,7 +1433,11 @@ impl CommandRuntime {
             .iter()
             .map(|(k, v)| (std::ffi::OsString::from(k), std::ffi::OsString::from(v)))
             .collect();
-        let wslenv_dropped = filter_wslenv_for_spawn(&mut env_os);
+        let wslenv_dropped = if environment == terminal_commander_core::EnvironmentMode::Inherit {
+            filter_wslenv_for_spawn(&mut env_os)
+        } else {
+            Vec::new()
+        };
         let wslenv_reported = wslenv_dropped_to_report(&req.argv, wslenv_dropped.clone());
         let probe_cfg = ProcessProbeConfig {
             probe_id: Some(probe_id),
@@ -1364,7 +1480,12 @@ impl CommandRuntime {
         // bare name as typed); ONLY the OS spawn sees the resolved absolute
         // path. Runs AFTER the shell-interpreter denylist above, so a denied
         // interpreter can never reach resolution. No-op on Unix.
-        let spawn_argv: Cow<'_, [String]> = match resolve_windows_argv0(&req.argv[0]) {
+        let resolved_argv0 = if environment == terminal_commander_core::EnvironmentMode::Inherit {
+            resolve_windows_argv0(&req.argv[0])
+        } else {
+            None
+        };
+        let spawn_argv: Cow<'_, [String]> = match resolved_argv0 {
             Some(full) => {
                 let mut v = req.argv.clone();
                 v[0] = full;
@@ -1378,12 +1499,13 @@ impl CommandRuntime {
         // Windows: ProcessProbe::spawn applies CREATE_NO_WINDOW for combed runtime
         // spawns. JS bridge (lib/wsl/spawn.js) intentionally does NOT — WWS04 EDR
         // legitimacy ritual. See docs/release/windows-wsl-bridge-contract.md §4.4.
-        let mut probe = match ProcessProbe::spawn(
+        let mut probe = match ProcessProbe::spawn_with_environment(
             &spawn_argv,
             &probe_cfg,
             Arc::clone(&self.rings),
             sifter,
             sink,
+            environment,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -1435,6 +1557,8 @@ impl CommandRuntime {
         // is moved into the lifecycle closure, so `stop()` can snapshot the
         // real frame/byte/event counts of a job it kills.
         let metrics_live = probe.metrics_handle();
+        let process_identity = probe.identity();
+        let cpu_sampler = probe.cpu_sampler_handle();
         // Resource governor: the mode is final right after spawn, so the
         // start response, a collapsed duplicate, and a running status all
         // report it. Peak and exit reason come from the waiter at exit.
@@ -1471,6 +1595,8 @@ impl CommandRuntime {
         self.live.write().insert(
             job_id,
             JobBinding {
+                process_identity,
+                cpu_sampler,
                 metrics: ProcessProbeMetrics::default(),
                 sifter: sifter_for_binding,
                 inline_rules: inline_rules_for_binding,
@@ -1646,6 +1772,10 @@ impl CommandRuntime {
                     None,
                 );
                 waiter_dedup.lock().remove(&dedup_k);
+                if let Some(binding) = waiter_live.write().get_mut(&job_id) {
+                    binding.metrics = final_metrics;
+                    binding.completion_committed = true;
+                }
                 return;
             }
 
@@ -1911,12 +2041,17 @@ impl CommandRuntime {
     /// IPC-server drain (`server.rs::drain_connections`). Cross-platform:
     /// the command runtime is not unix-only.
     pub async fn drain_lifecycle_tasks(&self) {
+        self.drain_lifecycle_tasks_report().await;
+    }
+
+    /// Drain tracked lifecycle tasks, reporting whether every task completed.
+    pub async fn drain_lifecycle_tasks_report(&self) -> bool {
         let mut tasks = {
             let mut guard = self.lifecycle_tasks.lock();
             std::mem::take(&mut *guard)
         };
         if tasks.is_empty() {
-            return;
+            return true;
         }
         let drain = async { while tasks.join_next().await.is_some() {} };
         if tokio::time::timeout(LIFECYCLE_DRAIN_CEILING, drain)
@@ -1927,7 +2062,15 @@ impl CommandRuntime {
             // ignoring its grace deadline). Abort the stragglers so the
             // process can exit; best-effort, not re-awaited.
             tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+            return false;
         }
+        true
+    }
+
+    /// Runtime-independent cancellation fallback for embedded Drop.
+    pub fn abort_lifecycle_tasks(&self) {
+        self.lifecycle_tasks.lock().abort_all();
     }
     /// Recompute every live job's sifter from the current
     /// activation registry snapshot + that job's stored inline
@@ -2137,7 +2280,21 @@ impl CommandRuntime {
             None => return Err(CommandError::UnknownJob(job_id)),
         };
         let elapsed_ms = running_elapsed_ms(&rec);
+        let (process_identity, cpu) =
+            self.live
+                .read()
+                .get(&job_id)
+                .map_or((None, None), |binding| {
+                    (
+                        Some(binding.process_identity),
+                        Some(binding.cpu_sampler.lock().sample()),
+                    )
+                });
         Ok(CommandStatusResponse {
+            process_observation: Some(metrics.observation),
+            process_cleanup: Some(metrics.cleanup),
+            process_identity,
+            cpu,
             job_id,
             bucket_id: rec.config.bucket_id,
             probe_id: rec.config.probe_id,
@@ -2163,7 +2320,7 @@ impl CommandRuntime {
             pipeline_exit_masked,
             awaiting_credential: None,
             elapsed_ms,
-            last_output_age_ms: elapsed_ms.and(metrics.last_frame_at).map(output_age_ms),
+            last_output_age_ms: elapsed_ms.and(metrics.last_output_at).map(output_age_ms),
             governor: governor.governor,
             limits_applied: governor.limits_applied,
             peak_memory_bytes: governor.peak_memory_bytes,
@@ -2264,6 +2421,16 @@ impl CommandRuntime {
         }
 
         Some(CommandStatusResponse {
+            process_observation: evidence
+                .as_ref()
+                .and_then(|v| v.get("process_observation"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            process_cleanup: evidence
+                .as_ref()
+                .and_then(|v| v.get("process_cleanup"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            process_identity: None,
+            cpu: None,
             job_id,
             bucket_id,
             probe_id,
@@ -2515,7 +2682,7 @@ pub(crate) fn evidence_json(
         "{{\"frames_total\":{},\"frames_stdout\":{},\"frames_stderr\":{},\
          \"bytes_total\":{},\"frames_suppressed\":{},\
          \"frames_suppressed_progress\":{},\"frames_suppressed_dedupe\":{},\
-         \"duration_ms\":{},\"probe_id\":\"{}\"{}}}",
+         \"duration_ms\":{},\"probe_id\":\"{}\",\"process_observation\":{},\"process_cleanup\":{}{}}}",
         metrics.frames_total,
         metrics.frames_stdout,
         metrics.frames_stderr,
@@ -2525,6 +2692,8 @@ pub(crate) fn evidence_json(
         metrics.frames_suppressed_dedupe,
         duration,
         probe_id.to_wire_string(),
+        serde_json::to_string(&metrics.observation).unwrap_or_else(|_| "null".to_owned()),
+        serde_json::to_string(&metrics.cleanup).unwrap_or_else(|_| "null".to_owned()),
         governor.evidence_fields(),
     )
 }
@@ -2557,7 +2726,7 @@ pub(crate) fn persist_job_receipt(
     events_emitted: u64,
     metrics_json: Option<&str>,
     end_cause: Option<&str>,
-) {
+) -> bool {
     let terminal_state = match state {
         JobState::Exited => "exited",
         JobState::Cancelled => "cancelled",
@@ -2585,7 +2754,9 @@ pub(crate) fn persist_job_receipt(
             error = %e,
             "TC-B3: failed to persist job receipt (post-restart status fallback unavailable for this job)"
         );
+        return false;
     }
+    true
 }
 
 #[cfg(unix)]

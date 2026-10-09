@@ -26,6 +26,7 @@
 pub mod ansi;
 pub mod file;
 pub mod governor;
+pub mod job_cpu;
 pub mod noise_pipeline;
 pub mod process;
 pub mod pty;
@@ -43,9 +44,14 @@ pub use noise_pipeline::{
 };
 pub use process::{
     DEFAULT_GRACE, EventSink, InMemorySink, ProcessProbe, ProcessProbeConfig, ProcessProbeError,
-    ProcessProbeMetrics,
+    ProcessProbeMetrics, ProcessProbeReport,
 };
 pub use pty::{AnsiNormalizer, PromptDetector, PromptKind};
+pub use terminal_commander_core::{
+    EnvironmentMode, ObservationIncompleteReason, PipeReadErrorKind, PipeReadFailure,
+    ProcessCleanup, ProcessIdentity, ProcessObservation, ProcessOwnership, StreamObservation,
+    StreamObservationState,
+};
 // PTY probe surface is available on every host with a PTY backend (unix
 // `pty-process` and Windows ConPTY via `portable-pty`).
 #[cfg(any(unix, windows))]

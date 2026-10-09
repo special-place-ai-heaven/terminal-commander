@@ -21,7 +21,21 @@
   "response_example": {
     "ok": true,
     "uptime_secs": 42,
-    "version": "0.1.51"
+    "version": "0.3.14",
+    "identity": {
+      "api_version": 1,
+      "schema_version": 1,
+      "engine_version": "0.3.14",
+      "build": {
+        "source_fingerprint": "fnv1a128:00000000000000000000000000000000",
+        "target": "x86_64-unknown-linux-gnu",
+        "compiler": "rustc 1.97.1",
+        "profile": "release",
+        "features": "",
+        "provenance": null
+      },
+      "instance_id": "00000000-0000-4000-8000-000000000001"
+    }
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
@@ -48,6 +62,7 @@
     "requires_daemon=true in system_discover",
     "success payload contains ok, uptime_secs, and the daemon's version",
     "version is the responding daemon's compile-time crate version",
+    "identity records the engine API/schema versions, immutable build inputs and current boot instance; it agrees with system_discover",
     "does not synthesize liveness while daemon is unavailable"
   ]
 }

@@ -44,6 +44,7 @@ pub trait AuditSink: Send + Sync + std::fmt::Debug {
 /// Persistent audit sink backed by the store actor.
 pub struct PersistentAudit {
     store: StoreClient,
+    engine_instance: Option<uuid::Uuid>,
 }
 
 impl std::fmt::Debug for PersistentAudit {
@@ -59,7 +60,15 @@ impl PersistentAudit {
     /// writable; reader-only stores will surface an error on first emit.
     #[must_use]
     pub const fn new(store: StoreClient) -> Self {
-        Self { store }
+        Self {
+            store,
+            engine_instance: None,
+        }
+    }
+
+    pub(crate) const fn with_engine_instance(mut self, instance: uuid::Uuid) -> Self {
+        self.engine_instance = Some(instance);
+        self
     }
 
     /// Apply the V0003 audit migration eagerly. Call once at boot if
@@ -74,9 +83,35 @@ impl PersistentAudit {
 
 impl AuditSink for PersistentAudit {
     fn emit(&self, entry: &AuditEntry) -> Result<u64, EventStoreError> {
-        match self.store.call(StoreOp::RecordAudit {
-            entry: entry.clone(),
-        })? {
+        let mut entry = entry.clone();
+        if let Some(instance) = self.engine_instance
+            && matches!(
+                entry.action.as_str(),
+                "command_start" | "pty_command_start" | "shell_session_start"
+            )
+        {
+            let mut metadata = entry
+                .metadata_json
+                .as_deref()
+                .and_then(|text| {
+                    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text).ok()
+                })
+                .unwrap_or_default();
+            metadata.insert(
+                "engine_instance_id".into(),
+                serde_json::json!(instance.to_string()),
+            );
+            metadata.insert(
+                "engine_api_version".into(),
+                serde_json::json!(terminal_commander_ipc::engine::ENGINE_API_VERSION),
+            );
+            metadata.insert(
+                "engine_build_fingerprint".into(),
+                serde_json::json!(env!("TC_SOURCE_FINGERPRINT")),
+            );
+            entry.metadata_json = Some(serde_json::Value::Object(metadata).to_string());
+        }
+        match self.store.call(StoreOp::RecordAudit { entry })? {
             StoreReply::AuditId(id) => Ok(id),
             other => Err(unexpected_reply("RecordAudit", &other)),
         }

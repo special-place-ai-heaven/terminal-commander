@@ -38,6 +38,12 @@ use crate::store_actor::StoreClient;
 /// Errors raised during daemon bootstrap.
 #[derive(Debug, thiserror::Error)]
 pub enum BootstrapError {
+    #[error("invalid engine configuration: {0}")]
+    Config(#[from] crate::config::ConfigError),
+    #[error("engine data directory is already owned: {0}")]
+    DataDirInUse(std::path::PathBuf),
+    #[error("cannot lock engine data directory: {0}")]
+    DataDirLock(std::io::Error),
     #[error("failed to create data dir '{path}': {source}")]
     CreateDataDir {
         path: std::path::PathBuf,
@@ -67,6 +73,8 @@ pub struct DaemonState {
     /// (a restart) and re-open from a clean state. See subscriptions
     /// spec MUST-ADD #6.
     pub boot_id: uuid::Uuid,
+    /// Explicit in-process host grant; never deserialized or inferred from a peer label.
+    pub(crate) embedded_host_admin: bool,
     /// Store actor client (single writer thread). Shared between IPC
     /// registry handlers, bootstrap, and the persistent audit sink.
     pub store: StoreClient,
@@ -217,18 +225,32 @@ impl DaemonState {
                     frames_suppressed_progress: s.frames_suppressed_progress,
                     frames_suppressed_dedupe: s.frames_suppressed_dedupe,
                     last_frame_at: None,
+                    observation: s.process_observation.unwrap_or_default(),
+                    cleanup: s.process_cleanup.unwrap_or_default(),
+                    ..Default::default()
                 };
-                (
-                    Some(crate::command::evidence_json(
+                let mut evidence: serde_json::Value =
+                    serde_json::from_str(&crate::command::evidence_json(
                         &metrics,
                         s.duration_ms,
                         s.probe_id,
                         &crate::governor::GovernorOutcome::default(),
-                    )),
-                    s.events_emitted,
-                )
+                    ))
+                    .expect("generated evidence is JSON");
+                // PTY/watch lanes do not report process-pipe observations. Do
+                // not manufacture them from the ProcessProbeMetrics defaults.
+                if s.process_observation.is_none() {
+                    evidence
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("process_observation");
+                }
+                if s.process_cleanup.is_none() {
+                    evidence.as_object_mut().unwrap().remove("process_cleanup");
+                }
+                (Some(evidence.to_string()), s.events_emitted)
             });
-            crate::command::persist_job_receipt(
+            let persisted = crate::command::persist_job_receipt(
                 &self.store,
                 job_id,
                 rec.config.bucket_id,
@@ -239,7 +261,9 @@ impl DaemonState {
                 evidence.as_deref(),
                 Some(terminal_commander_store::ABANDONED_END_CAUSE),
             );
-            recorded = recorded.saturating_add(1);
+            if persisted {
+                recorded = recorded.saturating_add(1);
+            }
         }
         if recorded > 0 {
             tracing::info!(
@@ -294,7 +318,9 @@ impl DaemonState {
         ensure_dir(&config.daemon.data_dir, &mut tightened)?;
         let db_path = config.db_path();
         let store = StoreClient::open_writer(&db_path)?;
-        let audit = Arc::new(PersistentAudit::new(store.clone()));
+        // Shared by discovery, subscriptions and durable command-start correlation.
+        let boot_id = uuid::Uuid::new_v4();
+        let audit = Arc::new(PersistentAudit::new(store.clone()).with_engine_instance(boot_id));
         audit.ensure_migration().map_err(BootstrapError::Store)?;
 
         // Apply the TC13 registry migration eagerly so bootstrap can
@@ -471,10 +497,6 @@ impl DaemonState {
             config.socket_path().display().to_string(),
         ));
 
-        // Mint a fresh per-boot identity. A restart produces a new value;
-        // surfaced on `subscription_open` as the restart signal (MUST-ADD #6).
-        let boot_id = uuid::Uuid::new_v4();
-
         // The store holds command output: owner-only. SQLite gives its WAL
         // and shared-memory files the database file's mode.
         for suffix in ["", "-wal", "-shm"] {
@@ -487,6 +509,7 @@ impl DaemonState {
             config,
             tightened,
             boot_id,
+            embedded_host_admin: false,
             store,
             last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
             shutdown_tx: watch::channel(false).0,

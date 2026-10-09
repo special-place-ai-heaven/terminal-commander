@@ -98,6 +98,9 @@ pub struct CredentialBroker {
     open_within: Duration,
     /// The IPC endpoint this daemon binds, for [`provide_command`].
     endpoint: String,
+    /// An embedded host handles owner UI itself; no daemon endpoint is bound.
+    embedded_instance: Option<uuid::Uuid>,
+    native_prompts: bool,
     asked: parking_lot::Mutex<HashMap<JobId, Ask>>,
 }
 
@@ -120,8 +123,46 @@ impl CredentialBroker {
             url_ttl,
             open_within,
             endpoint,
+            embedded_instance: None,
+            native_prompts: true,
             asked: parking_lot::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Select host-managed owner interaction before exposing the engine.
+    pub(crate) fn use_embedded_owner_interaction(
+        &mut self,
+        instance: uuid::Uuid,
+        native_prompts: bool,
+    ) {
+        self.embedded_instance = Some(instance);
+        self.native_prompts = native_prompts;
+        self.endpoint.clear();
+    }
+
+    fn request_response(
+        &self,
+        job_id: JobId,
+        status: CredentialStatus,
+        prompt: &CredentialPrompt,
+    ) -> CredentialRequestResponse {
+        let mut result = response(job_id, status, &self.endpoint);
+        if status == CredentialStatus::OwnerActionRequired
+            && let (Some(instance), Some(awaiting)) =
+                (self.embedded_instance, prompt.awaiting.as_ref())
+        {
+            result.owner_action = Some(
+                terminal_commander_ipc::protocol::CredentialOwnerAction::Provide {
+                    challenge: terminal_commander_ipc::protocol::CredentialChallenge {
+                        job_id,
+                        instance_id: instance.to_string(),
+                        prompt_generation: prompt.generation,
+                        kind: awaiting.kind,
+                    },
+                },
+            );
+        }
+        result
     }
 
     /// Ask the owner for the password `job_id` is waiting on and wait up to
@@ -156,15 +197,19 @@ impl CredentialBroker {
                         },
                     );
                     let rx = outcome.subscribe();
-                    let text = PromptText::new(job_id, awaiting.kind, &prompt);
-                    spawn_owner_prompt(
-                        Arc::clone(pty),
-                        self.prompter.clone(),
-                        job_id,
-                        prompt.generation,
-                        text,
-                        outcome,
-                    );
+                    if self.native_prompts {
+                        let text = PromptText::new(job_id, awaiting.kind, &prompt);
+                        spawn_owner_prompt(
+                            Arc::clone(pty),
+                            self.prompter.clone(),
+                            job_id,
+                            prompt.generation,
+                            text,
+                            outcome,
+                        );
+                    } else {
+                        settle(&outcome, CredentialStatus::OwnerActionRequired);
+                    }
                     rx
                 }
             }
@@ -181,7 +226,7 @@ impl CredentialBroker {
                 Ok(Ok(done)) => done.unwrap_or(unanswered),
                 _ => unanswered,
             };
-        Ok(response(job_id, status, &self.endpoint))
+        Ok(self.request_response(job_id, status, &prompt))
     }
 
     /// Record an answer that arrived through the admin CLI, so a pending or
@@ -330,14 +375,18 @@ impl CredentialBroker {
             }
             ask.page = None;
         }
-        spawn_owner_prompt(
-            Arc::clone(pty),
-            self.prompter.clone(),
-            job.job_id,
-            job.generation,
-            job.text.clone(),
-            Arc::clone(outcome),
-        );
+        if self.native_prompts {
+            spawn_owner_prompt(
+                Arc::clone(pty),
+                self.prompter.clone(),
+                job.job_id,
+                job.generation,
+                job.text.clone(),
+                Arc::clone(outcome),
+            );
+        } else {
+            settle(outcome, CredentialStatus::OwnerActionRequired);
+        }
     }
 
     /// An expired page: forget it so the next `Open` starts a fresh one.
@@ -374,8 +423,9 @@ fn response(job_id: JobId, status: CredentialStatus, endpoint: &str) -> Credenti
     CredentialRequestResponse {
         job_id,
         status,
-        command: (status == CredentialStatus::OwnerActionRequired)
+        command: (status == CredentialStatus::OwnerActionRequired && !endpoint.is_empty())
             .then(|| provide_command(job_id, endpoint)),
+        owner_action: None,
     }
 }
 
@@ -1040,6 +1090,47 @@ mod tests {
                 .command
                 .is_none()
         );
+    }
+
+    #[test]
+    fn headless_owner_action_never_names_an_unbound_ipc_endpoint() {
+        let result = response(JobId::new(), CredentialStatus::OwnerActionRequired, "");
+        assert!(
+            result.command.is_none(),
+            "an embedded owner has no bound daemon CLI endpoint"
+        );
+    }
+
+    #[test]
+    fn embedded_owner_modes_share_a_typed_fallback_without_invoking_native_ui() {
+        use terminal_commander_ipc::protocol::{AwaitingCredential, CredentialOwnerAction};
+        let job = JobId::new();
+        let instance = uuid::Uuid::new_v4();
+        let mut prompt = prompt(&[]);
+        prompt.generation = 17;
+        prompt.awaiting = Some(AwaitingCredential {
+            kind: CredentialKind::Password,
+            since_ms: 0,
+        });
+        let text = PromptText::new(job, CredentialKind::Password, &prompt);
+        assert!(matches!(ask_owner(Some("none"), &text), Asked::Unavailable));
+        for native_prompts in [false, true] {
+            let mut broker = CredentialBroker::new(
+                None,
+                CREDENTIAL_URL_TTL,
+                CREDENTIAL_PAGE_OPEN_WITHIN,
+                "/unbound/endpoint".into(),
+            );
+            broker.use_embedded_owner_interaction(instance, native_prompts);
+            assert_eq!(broker.native_prompts, native_prompts);
+            let result =
+                broker.request_response(job, CredentialStatus::OwnerActionRequired, &prompt);
+            assert!(result.command.is_none());
+            let CredentialOwnerAction::Provide { challenge } = result.owner_action.unwrap();
+            assert_eq!(challenge.job_id, job);
+            assert_eq!(challenge.instance_id, instance.to_string());
+            assert_eq!(challenge.prompt_generation, 17);
+        }
     }
 
     #[test]

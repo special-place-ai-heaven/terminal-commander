@@ -453,6 +453,7 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::BucketSummary(_) => "bucket_summary",
         IpcRequest::EventContext(_) => "event_context",
         IpcRequest::CommandStartCombed(_) => "command_start_combed",
+        IpcRequest::CommandStartIsolated(_) => "command_start_isolated",
         IpcRequest::CommandStatus(_) => "command_status",
         IpcRequest::CommandStop(_) => "command_stop",
         IpcRequest::CommandOutputTail(_) => "command_output_tail",
@@ -491,6 +492,7 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::PtyCommandList => "pty_command_list",
         IpcRequest::CredentialRequest(_) => "credential_request",
         IpcRequest::CredentialProvide(_) => "credential_provide",
+        IpcRequest::CredentialProvideChallenge(_) => "credential_provide_challenge",
         IpcRequest::CredentialUrl(_) => "credential_url",
         IpcRequest::ShellSessionStart(_) => "shell_session_start",
         IpcRequest::ShellSessionExec(_) => "shell_session_exec",
@@ -529,6 +531,7 @@ pub(crate) const DISCOVERABLE_METHODS: &[&str] = &[
     "bucket_summary",
     "event_context",
     "command_start_combed",
+    "command_start_isolated",
     "command_status",
     "command_stop",
     "command_output_tail",
@@ -566,6 +569,7 @@ pub(crate) const DISCOVERABLE_METHODS: &[&str] = &[
     "pty_command_list",
     "credential_request",
     "credential_provide",
+    "credential_provide_challenge",
     "credential_url",
     "shell_session_start",
     "shell_session_exec",
@@ -628,6 +632,7 @@ async fn dispatch(
                 uptime_secs: boot.elapsed().as_secs(),
                 idle_secs: Some(state.idle_secs()),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
+                identity: Some(crate::embedded::engine_identity(state)),
             };
             IpcResult::Ok { response: r }
         }
@@ -663,6 +668,21 @@ async fn dispatch(
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
         },
+        IpcRequest::CommandStartIsolated(p) => {
+            let mut params = p.command.clone();
+            params.cwd = Some(p.cwd.clone());
+            match local_environment_only(params.environment.as_ref()).and_then(|()| {
+                handlers::command::handle_command_start_with_environment(
+                    state,
+                    &params,
+                    peer,
+                    terminal_commander_core::EnvironmentMode::Clear,
+                )
+            }) {
+                Ok(response) => IpcResult::Ok { response },
+                Err(error) => IpcResult::Err { error },
+            }
+        }
         IpcRequest::CommandStatus(p) => match handlers::command::handle_command_status(state, p) {
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
@@ -860,6 +880,12 @@ async fn dispatch(
         }
         IpcRequest::CredentialProvide(p) => {
             match handlers::pty::handle_credential_provide(state, p, peer).await {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
+        IpcRequest::CredentialProvideChallenge(p) => {
+            match handlers::pty::handle_credential_provide_challenge(state, p, peer).await {
                 Ok(r) => IpcResult::Ok { response: r },
                 Err(e) => IpcResult::Err { error: e },
             }
@@ -1075,6 +1101,8 @@ fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
             .iter()
             .map(|m| (*m).to_owned())
             .collect(),
+        identity: Some(crate::embedded::engine_identity(state)),
+        capabilities: crate::embedded::engine_capabilities(state),
         environment: Box::new(state.discover_environment()),
     })
 }
@@ -1436,6 +1464,12 @@ mod tests {
     #[allow(clippy::too_many_lines)] // one line per IpcRequest variant
     fn all_request_variants() -> Vec<IpcRequest> {
         vec![
+            IpcRequest::CommandStartIsolated(
+                terminal_commander_ipc::protocol::IsolatedCommandParams::new(
+                    CommandStartParams::new(vec!["unused".into()]),
+                    std::path::PathBuf::from("/workspace"),
+                ),
+            ),
             IpcRequest::SystemDiscover,
             IpcRequest::Health,
             IpcRequest::PolicyStatus,
@@ -1654,6 +1688,17 @@ mod tests {
                 from_mcp: true,
                 interactive: false,
             }),
+            IpcRequest::CredentialProvideChallenge(
+                terminal_commander_ipc::protocol::CredentialProvideChallengeParams {
+                    challenge: terminal_commander_ipc::protocol::CredentialChallenge {
+                        job_id: JobId::new(),
+                        instance_id: String::new(),
+                        prompt_generation: 0,
+                        kind: terminal_commander_ipc::CredentialKind::Password,
+                    },
+                    secret: terminal_commander_ipc::OwnerSecret::new(String::new()),
+                },
+            ),
             IpcRequest::CredentialUrl(terminal_commander_ipc::CredentialUrlParams {
                 job_id: JobId::new(),
                 op: terminal_commander_ipc::CredentialUrlOp::Open,

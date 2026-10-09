@@ -111,6 +111,43 @@
   "response_example_summary": {
     "adapter_version": "0.3.11",
     "daemon": {
+      "identity": {
+        "api_version": 1,
+        "schema_version": 1,
+        "engine_version": "0.3.14",
+        "build": {
+          "source_fingerprint": "fnv1a128:00000000000000000000000000000000",
+          "target": "x86_64-unknown-linux-gnu",
+          "compiler": "rustc 1.97.1",
+          "profile": "release",
+          "features": "",
+          "provenance": null
+        },
+        "instance_id": "00000000-0000-4000-8000-000000000001"
+      },
+      "capabilities": [
+        {"feature":"commands","availability":"available"},
+        {"feature":"isolated_commands","availability":"available"},
+        {"feature":"files","availability":"available"},
+        {"feature":"file_watches","availability":"available"},
+        {"feature":"sifters","availability":"available"},
+        {"feature":"buckets","availability":"available"},
+        {"feature":"context","availability":"available"},
+        {"feature":"tails","availability":"available"},
+        {"feature":"registry","availability":"available"},
+        {"feature":"recipes","availability":"available"},
+        {"feature":"subscriptions","availability":"available"},
+        {"feature":"policy","availability":"available"},
+        {"feature":"audit","availability":"available"},
+        {"feature":"resource_limits","availability":"available"},
+        {"feature":"process_observation","availability":"available"},
+        {"feature":"shell","availability":"available"},
+        {"feature":"pty","availability":"available"},
+        {"feature":"shell_sessions","availability":"available"},
+        {"feature":"whole_job_cpu","availability":"available"},
+        {"feature":"owner_credentials","availability":"host_permission_required"},
+        {"feature":"remote_targets","availability":"host_transport_required"}
+      ],
       "environment": {
         "arch": "x86_64",
         "argv_rule": "Each argv_tools entry has a direct_argv route: run it with an argv action as [<that too...",
@@ -221,6 +258,43 @@
   "response_example_full": {
     "adapter_version": "0.3.11",
     "daemon": {
+      "identity": {
+        "api_version": 1,
+        "schema_version": 1,
+        "engine_version": "0.3.14",
+        "build": {
+          "source_fingerprint": "fnv1a128:00000000000000000000000000000000",
+          "target": "x86_64-unknown-linux-gnu",
+          "compiler": "rustc 1.97.1",
+          "profile": "release",
+          "features": "",
+          "provenance": null
+        },
+        "instance_id": "00000000-0000-4000-8000-000000000001"
+      },
+      "capabilities": [
+        {"feature":"commands","availability":"available"},
+        {"feature":"isolated_commands","availability":"available"},
+        {"feature":"files","availability":"available"},
+        {"feature":"file_watches","availability":"available"},
+        {"feature":"sifters","availability":"available"},
+        {"feature":"buckets","availability":"available"},
+        {"feature":"context","availability":"available"},
+        {"feature":"tails","availability":"available"},
+        {"feature":"registry","availability":"available"},
+        {"feature":"recipes","availability":"available"},
+        {"feature":"subscriptions","availability":"available"},
+        {"feature":"policy","availability":"available"},
+        {"feature":"audit","availability":"available"},
+        {"feature":"resource_limits","availability":"available"},
+        {"feature":"process_observation","availability":"available"},
+        {"feature":"shell","availability":"available"},
+        {"feature":"pty","availability":"available"},
+        {"feature":"shell_sessions","availability":"available"},
+        {"feature":"whole_job_cpu","availability":"available"},
+        {"feature":"owner_credentials","availability":"host_permission_required"},
+        {"feature":"remote_targets","availability":"host_transport_required"}
+      ],
       "environment": {
         "access_routes": [
           {

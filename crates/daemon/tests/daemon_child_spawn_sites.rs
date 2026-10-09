@@ -26,7 +26,8 @@ const TEST_ONLY: &[&str] = &[];
 /// constructor.
 const WINDOW: usize = 6;
 /// The `WSLENV` handling must appear within this many code lines after it.
-const WSLENV_WINDOW: usize = 12;
+/// Includes the explicit clear/inherit branch and native cleanup setup.
+const WSLENV_WINDOW: usize = 16;
 
 /// How a site keeps the daemon's `WSLENV` from reaching its child unfiltered.
 enum Wslenv {
@@ -120,10 +121,10 @@ const SITES: &[Site] = &[
     },
     Site {
         file: "probes/src/process.rs",
-        constructor: r#"Command::new("kill")"#,
-        what: "process-group TERM/KILL on cancel",
-        requires: STD,
-        wslenv: Wslenv::UnixOnly,
+        constructor: r#"Command::new("sh")"#,
+        what: "test-only ownership cleanup handshake",
+        requires: TEST_ONLY,
+        wslenv: Wslenv::TestOnly,
     },
     Site {
         file: "probes/src/pty.rs",
@@ -222,7 +223,11 @@ fn wslenv_problem(site: &Site, lines: &[&str], i: usize) -> Option<String> {
         }
         Wslenv::UnixOnly => (!under_cfg_unix(lines, i))
             .then(|| "listed as unix-only but not under `#[cfg(unix)]`".to_owned()),
-        Wslenv::TestOnly => None,
+        Wslenv::TestOnly => (!lines[..i].iter().any(|line| {
+            indent(line) < indent(lines[i])
+                && matches!(line.trim(), "#[cfg(test)]" | "#[cfg(all(test, unix))]")
+        }))
+        .then(|| "listed as test-only but not enclosed by a test cfg".to_owned()),
     }
 }
 
@@ -295,7 +300,7 @@ fn every_probe_lane_entry_filters_wslenv() {
         let lines: Vec<&str> = source.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             if is_comment(line)
-                || !(line.contains("ProcessProbe::spawn(") || line.contains("PtyProbe::spawn("))
+                || !(line.contains("ProcessProbe::spawn") || line.contains("PtyProbe::spawn"))
             {
                 continue;
             }
@@ -321,4 +326,43 @@ fn every_probe_lane_entry_filters_wslenv() {
         "expected the command and PTY lane entries, found {entries}"
     );
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// Low-level Clear stays exact, while every isolated daemon child is marked
+/// before reaching that lane. A cleared login shell must not start a daemon.
+#[test]
+fn isolated_daemon_lane_marks_children_without_inheriting_environment() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let process = std::fs::read_to_string(crates.join("probes/src/process.rs")).unwrap();
+    let spawn = process
+        .split_once("pub fn spawn_with_environment(")
+        .unwrap()
+        .1;
+    let setup = spawn.split_once("cmd.args(").unwrap().0;
+    assert!(setup.contains("if environment == EnvironmentMode::Clear"));
+    assert!(setup.contains("cmd.env_clear()"));
+    assert!(setup.contains("as_daemon_child(cmd.as_std_mut())"));
+
+    let command = std::fs::read_to_string(crates.join("daemon/src/command.rs")).unwrap();
+    let start = command
+        .split_once("pub fn start_combed_with_environment(")
+        .unwrap()
+        .1;
+    let start = start.split_once("self.start_combed_inner(").unwrap().0;
+    let clear = start.find("EnvironmentMode::Clear").unwrap();
+    let validated = start.find("validate_isolated_command(&req)?").unwrap();
+    let marker = start
+        .find(".push((terminal_commander_core::DAEMON_CHILD_ENV.into(), \"1\".into()))")
+        .unwrap();
+    assert!(clear < validated && validated < marker);
+    let validator = command
+        .split_once("fn validate_isolated_command(")
+        .unwrap()
+        .1;
+    let validator = validator.split_once("Ok(())").unwrap().0;
+    assert!(
+        validator
+            .contains("normalized == terminal_commander_core::DAEMON_CHILD_ENV && value != \"1\""),
+        "an isolated caller must not disable the daemon-child marker"
+    );
 }

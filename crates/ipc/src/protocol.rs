@@ -255,6 +255,16 @@ pub enum OutcomeTrust {
 /// Bounded status shape. Counters + final exit state only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandStatusResponse {
+    /// Raw transport observation, independent of process exit and sifter matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_observation: Option<terminal_commander_core::ProcessObservation>,
+    /// Process ownership cleanup is separate from output drain and exit status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_cleanup: Option<terminal_commander_core::ProcessCleanup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_identity: Option<terminal_commander_core::ProcessIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<terminal_commander_core::job_cpu::JobCpuSample>,
     pub job_id: JobId,
     pub bucket_id: BucketId,
     pub probe_id: terminal_commander_core::ProbeId,
@@ -488,6 +498,8 @@ pub enum IpcRequest {
     /// Start a non-PTY argv command. Bounded metadata response only;
     /// never returns raw stdout/stderr. Shell-bridge guard applies.
     CommandStartCombed(CommandStartParams),
+    /// Explicit cwd and an environment-cleared child through the same argv runtime.
+    CommandStartIsolated(IsolatedCommandParams),
     /// Lifecycle + counters lookup for a previously started command.
     CommandStatus(CommandStatusParams),
     /// Force-kill a running combed command by `job_id` (TC-3). Bounded
@@ -603,6 +615,9 @@ pub enum IpcRequest {
     /// Accepted only from the admin CLI peer (`terminal-commander
     /// credential provide`); an MCP-labelled peer is denied.
     CredentialProvide(CredentialProvideParams),
+    /// Answer a particular embedded owner challenge. Local owner authority is
+    /// still required; a serialized challenge is correlation, not permission.
+    CredentialProvideChallenge(CredentialProvideChallengeParams),
     /// MCP-adapter side of URL-mode elicitation: open, decline, or abandon
     /// the one-shot loopback page the owner types a PTY password into.
     /// Accepted only from the MCP adapter image; the URL never reaches the
@@ -711,6 +726,7 @@ impl IpcRequest {
             // duplicates server-side state, mints a fresh id, or advances
             // a server-held offset.
             Self::CommandStartCombed(_)
+            | Self::CommandStartIsolated(_)
             // Shell-lane start (TC49): spawns a fresh `[shell,"-lc",line]`
             // child + mints a job/bucket exactly like CommandStartCombed,
             // so a blind retry double-spawns. Non-idempotent.
@@ -728,6 +744,7 @@ impl IpcRequest {
             // dialog, but a blind re-send is still not a pure read.
             | Self::CredentialRequest(_)
             | Self::CredentialProvide(_)
+            | Self::CredentialProvideChallenge(_)
             | Self::CredentialUrl(_)
             // Session lane (P1 / TC50): start spawns a fresh session
             // shell + mints ids; exec writes stdin + advances the read
@@ -865,6 +882,9 @@ pub enum IpcResult {
 /// [`IpcRequest`] variant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "method")]
+// Keep existing public response constructors source-compatible; observations
+// grow CommandStatus without introducing a Box into its established variant.
+#[allow(clippy::large_enum_variant)]
 pub enum IpcResponse {
     SystemDiscover(DiscoverResponse),
     Health {
@@ -875,11 +895,14 @@ pub enum IpcResponse {
         #[serde(default)]
         idle_secs: Option<u64>,
         /// The responding daemon's own compile-time crate version
-        /// (`env!("CARGO_PKG_VERSION")`). Lets a client assert WHICH
-        /// build is live. `#[serde(default)]` keeps back-compat: a
+        /// (`env!("CARGO_PKG_VERSION")`). Use `identity.build` to distinguish
+        /// actual builds. `#[serde(default)]` keeps back-compat: a
         /// legacy daemon omits it, so an empty string means "unknown".
         #[serde(default)]
         version: String,
+        /// Actual engine/build/boot identity. Missing on legacy daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<crate::engine::EngineIdentity>,
     },
     PolicyStatus(PolicyStatusResponse),
     SelfCheck(SelfCheckResponse),
@@ -1058,6 +1081,11 @@ pub struct DiscoverResponse {
     pub mcp_spec: String,
     pub policy_profile: String,
     pub methods: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<crate::engine::EngineIdentity>,
+    /// Explicit platform and host-integration availability; per-call policy still applies.
+    #[serde(default)]
+    pub capabilities: Vec<crate::engine::EngineCapability>,
     /// Host evidence is additive so newer adapters can still decode older
     /// daemon responses as an empty/unknown snapshot.
     #[serde(default)]
@@ -1363,7 +1391,18 @@ pub struct IpcError {
     /// Boxed so the common `IpcError` stays small enough for `Result`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub teach: Option<Box<ShellTeach>>,
+    /// Content-free diagnostic correlation. Absent on older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Box<crate::engine::JobLostDetails>>,
 }
+
+impl std::fmt::Display for IpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for IpcError {}
 
 impl IpcError {
     /// Marker lead-in for CLIENT-SIDE transport failures (connect, write,
@@ -1389,6 +1428,7 @@ impl IpcError {
             argv0: None,
             tool: None,
             teach: None,
+            details: None,
         }
     }
 
@@ -1405,6 +1445,7 @@ impl IpcError {
             argv0: Some(argv0.into()),
             tool: None,
             teach: None,
+            details: None,
         }
     }
 
@@ -1423,6 +1464,7 @@ impl IpcError {
             argv0: None,
             tool: Some(tool.to_owned()),
             teach: None,
+            details: None,
         }
     }
 
@@ -1439,6 +1481,7 @@ impl IpcError {
             argv0: None,
             tool: None,
             teach: None,
+            details: None,
         }
     }
 
@@ -1700,7 +1743,7 @@ const fn default_true() -> bool {
 /// Wire shape for `command_start_combed`. Mirrors the daemon's
 /// `CommandStartRequest` but uses millis instead of `Duration` so the
 /// JSON form stays human-readable.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CommandStartParams {
     /// Target environment (default local parent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1761,12 +1804,62 @@ pub struct CommandStartParams {
     pub limits: Option<JobLimitsSpec>,
 }
 
+impl std::fmt::Debug for CommandStartParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandStartParams")
+            .field("argv_items", &self.argv.len())
+            .field("env_items", &self.env.len())
+            .field("cwd", &self.cwd)
+            .finish_non_exhaustive()
+    }
+}
+
 impl CommandStartParams {
+    /// Construct an argv request with the existing inherited-environment defaults.
+    pub const fn new(argv: Vec<String>) -> Self {
+        Self {
+            environment: None,
+            argv,
+            cwd: None,
+            env: Vec::new(),
+            bucket_config: None,
+            rules: Vec::new(),
+            grace_ms: None,
+            tag: None,
+            strip_ansi: true,
+            dedup_nonce: None,
+            receipt_shape: None,
+            limits: None,
+        }
+    }
+
     /// Resolve the effective grace `Duration`, clamping to the cap.
     #[must_use]
     pub fn grace(&self) -> Option<Duration> {
         self.grace_ms
             .map(|ms| Duration::from_millis(ms.min(MAX_COMMAND_GRACE_MS)))
+    }
+}
+
+/// Explicit environment-cleared argv request. Authority remains the engine policy.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct IsolatedCommandParams {
+    pub command: CommandStartParams,
+    pub cwd: PathBuf,
+}
+
+impl IsolatedCommandParams {
+    pub const fn new(command: CommandStartParams, cwd: PathBuf) -> Self {
+        Self { command, cwd }
+    }
+}
+
+impl std::fmt::Debug for IsolatedCommandParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IsolatedCommandParams")
+            .field("command", &self.command)
+            .field("cwd", &self.cwd)
+            .finish()
     }
 }
 
@@ -3151,7 +3244,7 @@ pub enum CredentialStatus {
     Provided,
     /// The owner cancelled the prompt.
     Declined,
-    /// No native prompt is available: the owner runs `command`.
+    /// The owner must answer through `command` or the typed `owner_action`.
     OwnerActionRequired,
     /// The owner has not answered yet; the prompt stays open and a repeat
     /// call waits on the same prompt.
@@ -3171,6 +3264,31 @@ pub struct CredentialRequestResponse {
     /// own terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// Embedded owner interaction; never contains a credential or an IPC URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_action: Option<CredentialOwnerAction>,
+}
+
+/// A bounded prompt identity. This is not an authorization grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialChallenge {
+    pub job_id: JobId,
+    pub instance_id: String,
+    pub prompt_generation: u64,
+    pub kind: CredentialKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "action")]
+pub enum CredentialOwnerAction {
+    Provide { challenge: CredentialChallenge },
+}
+
+/// An owner answer bound to the exact engine/job/prompt previously displayed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialProvideChallengeParams {
+    pub challenge: CredentialChallenge,
+    pub secret: OwnerSecret,
 }
 
 /// A secret the owner typed. `Debug` is redacted and the buffer is

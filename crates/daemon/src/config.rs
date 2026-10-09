@@ -693,7 +693,7 @@ impl DaemonConfig {
 
     /// Validate the loaded config. Clamps soft per-call limits down
     /// to the hard caps. Rejects clearly-broken values.
-    fn validate_and_clamp(&mut self) -> Result<()> {
+    pub(crate) fn validate_and_clamp(&mut self) -> Result<()> {
         // data_dir is required and must be non-empty.
         if self.daemon.data_dir.as_os_str().is_empty() {
             return Err(ConfigError::Validate(

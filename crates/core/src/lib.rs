@@ -22,10 +22,12 @@ pub mod error;
 pub mod event;
 pub mod ids;
 pub mod job;
+pub mod job_cpu;
 pub mod os_guard;
 #[cfg(windows)]
 pub mod platform;
 pub mod pointer;
+pub mod process_observation;
 pub mod recipe;
 mod recipe_match;
 pub mod recipe_seeds;
@@ -61,6 +63,11 @@ pub use os_guard::{
     shell_line_deletion_hit,
 };
 pub use pointer::SourcePointer;
+pub use process_observation::{
+    EnvironmentMode, ObservationIncompleteReason, PipeReadErrorKind, PipeReadFailure,
+    ProcessCleanup, ProcessIdentity, ProcessObservation, ProcessOwnership, StreamObservation,
+    StreamObservationState,
+};
 pub use recipe::{RecipeDefinition, RecipeError, RecipeStatus};
 pub use recipe_match::{RecipeTeachIntent, match_activated_recipe};
 pub use recipe_seeds::{RECIPE_SEEDS, RecipeSeed};

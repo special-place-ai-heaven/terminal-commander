@@ -200,6 +200,15 @@ const OPAQUE_KEYS: &[&str] = &["captures", "liveness"];
 /// compare keys and recurse into shared keys that are objects on both sides;
 /// arrays recurse into the first element when both are non-empty.
 fn diff_keys(path: &str, expected: &Value, actual: &Value, out: &mut Vec<(char, String)>) {
+    // CPU state is a platform- and observation-dependent tagged enum. Validate
+    // its typed contract rather than requiring one fixture variant at runtime.
+    if path == "$.cpu.state" {
+        serde_json::from_value::<terminal_commander_core::job_cpu::JobCpuState>(actual.clone())
+            .expect("live CPU state must match its typed wire contract");
+        serde_json::from_value::<terminal_commander_core::job_cpu::JobCpuState>(expected.clone())
+            .expect("fixture CPU state must match its typed wire contract");
+        return;
+    }
     match (expected, actual) {
         (Value::Object(e), Value::Object(a)) => {
             for k in e.keys().filter(|k| !a.contains_key(*k)) {
