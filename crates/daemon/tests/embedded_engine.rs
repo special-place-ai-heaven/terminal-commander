@@ -174,7 +174,13 @@ async fn stopped_command_eventually_reports_completed_cleanup() {
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "cancelled status must publish final cleanup evidence"
+            "cancelled status must publish final cleanup evidence; state={:?}, cleanup={:?}, observation={:?}, identity={:?}, exit_code={:?}, restarted={}",
+            status.state,
+            status.process_cleanup,
+            status.process_observation,
+            status.process_identity,
+            status.exit_code,
+            status.restarted,
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }

@@ -515,10 +515,10 @@ fn group_quiescent(pgid: u32) -> std::io::Result<bool> {
             else {
                 continue;
             };
-            let bytes = match std::fs::read(entry.path().join("stat")) {
-                Ok(bytes) => bytes,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
+            let Some(bytes) =
+                checked_stat_read(pgid, member_pid, std::fs::read(entry.path().join("stat")))?
+            else {
+                continue;
             };
             let end = bytes
                 .iter()
@@ -528,13 +528,10 @@ fn group_quiescent(pgid: u32) -> std::io::Result<bool> {
                 .map_err(|_| std::io::ErrorKind::InvalidData)?;
             let mut fields = fields.split_ascii_whitespace();
             let state = fields.next().ok_or(std::io::ErrorKind::InvalidData)?;
-            let group: u32 = fields
-                .nth(1)
-                .ok_or(std::io::ErrorKind::InvalidData)?
-                .parse()
-                .map_err(|_| std::io::ErrorKind::InvalidData)?;
+            let group_field = fields.nth(1).ok_or(std::io::ErrorKind::InvalidData)?;
+            let in_group = stat_group_matches(group_field, member_pid, pgid)?;
             anchor_seen |= member_pid == pgid;
-            if group == pgid && !matches!(state, "Z" | "X") {
+            if in_group && !matches!(state, "Z" | "X") {
                 return Ok(false);
             }
         }
@@ -548,6 +545,32 @@ fn group_quiescent(pgid: u32) -> std::io::Result<bool> {
         let _ = pgid;
         Err(std::io::ErrorKind::Unsupported.into())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn checked_stat_read(
+    pgid: u32,
+    member_pid: u32,
+    result: std::io::Result<Vec<u8>>,
+) -> std::io::Result<Option<Vec<u8>>> {
+    match result {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        // procfs may report ESRCH after an enumerated non-anchor PID disappears.
+        Err(error) if member_pid != pgid && error.raw_os_error() == Some(libc::ESRCH) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn stat_group_matches(field: &str, member_pid: u32, pgid: u32) -> std::io::Result<bool> {
+    // Linux stat field 5 is signed; a departing unrelated process can report -1.
+    let group: i32 = field.parse().map_err(|_| std::io::ErrorKind::InvalidData)?;
+    let in_group = i64::from(group) == i64::from(pgid);
+    if member_pid == pgid && !in_group {
+        return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+    }
+    Ok(in_group)
 }
 
 #[cfg(unix)]
@@ -1296,6 +1319,52 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
 mod ownership_cleanup_tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, BufReader};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disappearing_non_anchor_stat_is_skipped_but_anchor_and_permission_errors_fail_closed() {
+        let anchor = 100;
+        let disappeared = || Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+        assert_eq!(
+            checked_stat_read(anchor, anchor + 1, disappeared()).unwrap(),
+            None
+        );
+        assert_eq!(
+            checked_stat_read(anchor, anchor, disappeared())
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(
+            checked_stat_read(
+                anchor,
+                anchor + 1,
+                Err(std::io::Error::from_raw_os_error(libc::EACCES)),
+            )
+            .unwrap_err()
+            .raw_os_error(),
+            Some(libc::EACCES)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn signed_proc_group_field_preserves_membership_and_malformed_errors() {
+        assert!(stat_group_matches("100", 100, 100).unwrap());
+        assert!(!stat_group_matches("-1", 101, 100).unwrap());
+        assert_eq!(
+            stat_group_matches("-1", 100, 100)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        assert_eq!(
+            stat_group_matches("malformed", 101, 100)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
 
     #[tokio::test]
     async fn signal_delivery_does_not_claim_cleanup_before_leader_reap() {
