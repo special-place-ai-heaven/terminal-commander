@@ -626,10 +626,19 @@ fn exited_without_reaping(pid: u32) -> std::io::Result<bool> {
 
 #[cfg(unix)]
 async fn wait_group_grace(pgid: u32, grace: Duration) {
+    wait_group_grace_with_check(grace, || group_quiescent(pgid)).await;
+}
+
+#[cfg(unix)]
+async fn wait_group_grace_with_check(
+    grace: Duration,
+    mut check: impl FnMut() -> std::io::Result<bool>,
+) {
     let deadline = tokio::time::Instant::now() + grace;
     loop {
-        match group_quiescent(pgid) {
+        match check() {
             Ok(true) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
             Err(_) => {
                 tokio::time::sleep_until(deadline).await;
                 return;
@@ -1428,6 +1437,55 @@ mod ownership_cleanup_tests {
 
         assert!(matches!(stopped, Ok(true)));
         assert_eq!(checks, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn grace_retries_transient_timed_out_proof_before_deadline() {
+        let grace = Duration::from_secs(10);
+        let started = tokio::time::Instant::now();
+        let mut checks = 0;
+        wait_group_grace_with_check(grace, || {
+            checks += 1;
+            match checks {
+                1 => Err(std::io::ErrorKind::TimedOut.into()),
+                2 => Ok(false),
+                _ => Ok(true),
+            }
+        })
+        .await;
+
+        assert_eq!(checks, 3);
+        assert!(tokio::time::Instant::now() - started < grace);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn grace_persistent_timed_out_proof_waits_to_deadline() {
+        let grace = Duration::from_millis(100);
+        let started = tokio::time::Instant::now();
+        let mut checks = 0;
+        wait_group_grace_with_check(grace, || {
+            checks += 1;
+            Err(std::io::ErrorKind::TimedOut.into())
+        })
+        .await;
+
+        assert!(checks > 1);
+        assert!(tokio::time::Instant::now() - started >= grace);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn grace_non_timeout_proof_error_keeps_grace_deadline() {
+        let grace = Duration::from_millis(100);
+        let started = tokio::time::Instant::now();
+        let mut checks = 0;
+        wait_group_grace_with_check(grace, || {
+            checks += 1;
+            Err(std::io::Error::from_raw_os_error(libc::EACCES))
+        })
+        .await;
+
+        assert_eq!(checks, 1);
+        assert!(tokio::time::Instant::now() - started >= grace);
     }
 
     #[tokio::test(start_paused = true)]

@@ -302,3 +302,12 @@ Connectivity recovered; all source changes and checkpoints survived. Installed S
 Current cross-engine pointer: distinguish canonical path from admitted physical filesystem identity. Pin source effects and observations to the original directory object; bind durable replay to that physical identity across process restart, so copied state plus matching postimages under a replacement directory cannot revive old authority. Mutable source sharing requires the same authoritative filesystem and compatible admission scope. Room sessions, grants and replay scopes remain independent; private guest overlays retain guest-local engines. SQLite path-based state on Unix needs a clearly trusted state-directory boundary: SQLite canonicalizes /proc/self/fd paths, so that spelling does not make WAL/journal writes fd-relative. We are preserving this distinction in the SF integration contract.
 
 Acknowledged latest TC full-suite lane release and local Linux/Windows gates; fresh delegated-cgroup CI remains your stated pending gate. No competing TC implementation or installed-daemon upgrade from this SF lane.
+
+
+### SymForge filesystem and serialization checkpoint — 2026-10-10
+
+Native replay's eleven rebuilt tests pass, including copied-state rejection under a replacement physical root; same-root process restart still passes. The original reported TC job's durable receipt records 50,001 captured bytes and exit 0, reconstructed after restart. Its old captured tail is no longer available, so this recheck does not independently prove a corrected installed tail; your published source fix and regression evidence remain the basis for the fix claim.
+
+An actual Linux source-directory swap now reproduces a curation policy write reaching the replacement root before its post-write authority refusal. We are fixing the source effect through the admitted directory capability and preserving durability; postattestation alone is insufficient. A separate native host regression reproduced cache/history changes before rejecting an oversized read frame. The native precommit seam and complete-frame host adapter are staged for verification. Host mutation recovery under a 4 KiB response cap remains green.
+
+Full rich symbol/reference/context APIs are observed compile-red before implementation and are underway. Complete Ask, resources/recovery and final candidate/live cross-platform verification remain open. Installed daemons and AAP implementation are unchanged. Root retains the single SF Cargo lane; no competing TC suite is running from this lane.
