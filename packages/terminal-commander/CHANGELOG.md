@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.15](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.14...v0.3.15) (2026-10-10)
+
+
+### Features
+
+* **embed:** bring full engine parity and harden process supervision ([dfd0e6f](https://github.com/special-place-ai-heaven/terminal-commander/commit/dfd0e6fa6ea8aaecaa2a52a7488eb71ded9a76fc))
+
+
+### Bug Fixes
+
+* **probes:** retry timed-out cleanup observations within proof budget ([dfd0e6f](https://github.com/special-place-ai-heaven/terminal-commander/commit/dfd0e6fa6ea8aaecaa2a52a7488eb71ded9a76fc))
+* **probes:** retry transient grace-proof timeouts ([f2b9f20](https://github.com/special-place-ai-heaven/terminal-commander/commit/f2b9f201e3a37f03e63db714cfc5b1d9f901946c))
+* **probes:** tolerate departing non-anchor processes during cleanup proof ([d7cebfe](https://github.com/special-place-ai-heaven/terminal-commander/commit/d7cebfebf26d2667b3c0cb2aadc0f1f49c2d6a8d))
+
 ## [0.3.14](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.13...v0.3.14) (2026-10-06)
 
 
