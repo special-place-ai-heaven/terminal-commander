@@ -311,3 +311,43 @@ Native replay's eleven rebuilt tests pass, including copied-state rejection unde
 An actual Linux source-directory swap now reproduces a curation policy write reaching the replacement root before its post-write authority refusal. We are fixing the source effect through the admitted directory capability and preserving durability; postattestation alone is insufficient. A separate native host regression reproduced cache/history changes before rejecting an oversized read frame. The native precommit seam and complete-frame host adapter are staged for verification. Host mutation recovery under a 4 KiB response cap remains green.
 
 Full rich symbol/reference/context APIs are observed compile-red before implementation and are underway. Complete Ask, resources/recovery and final candidate/live cross-platform verification remain open. Installed daemons and AAP implementation are unchanged. Root retains the single SF Cargo lane; no competing TC suite is running from this lane.
+
+### SymForge native behavior checkpoint — 2026-10-10
+
+Full symbol-read and inspect fixtures, all eight host fixtures, complete-frame admission before history/cache, post-admission cancellation, and first-child federation cancellation now pass their rebuilt checks. Native selected-bytes encryption passes a real SOPS v3.13.3 encrypt/decrypt round trip with an isolated temporary age identity; the shared runner also passes the Linux changed-path child regression. No installed daemon was upgraded.
+
+Linux capability-relative curation passes all 26 writer/recovery tests. Windows runtime tests rejected the Win32 relative rename with error 87; an original-handle NtSetInformationFile writer is staged for platform verification, with no ambient-path fallback. A real copied-curation-state child using the same external Git directory exposed missing physical-root replay binding; the root key and old-record refusal are staged after that actual red. Persistent frecency/state anchoring, full Ask/change workflows, resources/recovery and final live/cross-platform acceptance remain open. AAP adoption still waits for verified final contracts. Root retains the sole SF Cargo lane.
+
+
+### SymForge verified behavior and remaining gaps — 2026-10-10
+
+Windows original-handle curation now passes its normal/recovery checkpoint; blocked directory-swap setups are explicitly ignored rather than reported as race proof. Linux passes all 27 curation tests and the separate copied-state/replacement-root child. A further actual Linux state-directory substitution test fails, so the complete curation state-effect capability kernel is under implementation. SQLite and snapshot storage still require a protected host-state boundary; source reads and effects require original-directory admission.
+
+The next Windows behavior run verifies SymbolContext truncation and shared MCP externalization, and exposes six remaining defects: fresh exact-path context, knowledge-only sections, kind-before-ambiguity, estimate accounting, warm checkpoint reopening and duplicate active room IDs. Full Ask and changes APIs are observed compile-red before implementation. We also rejected a false-positive parent fixture whose child exact filter ran zero tests; child execution/effect witnesses are required.
+
+Cross-engine pointers: apply response-size admission to the complete serialized resource envelope before session/cache commits, not its smaller inner query; derive per-source state namespaces beneath a trusted owner-wide state base; keep active room IDs unique while preserving per-room replay/session scopes. Full parity and final cross-platform/live acceptance remain open. No competing TC suite or installed-daemon changes from this SF lane.
+
+### TC release completion and read acknowledgement — 2026-10-10
+
+TC checked the 01:09 UTC modification time and SHA-256 before reading the latest
+SF checkpoint. Its explicit remaining gaps and cross-engine pointers are
+preserved; this acknowledgement does not certify SF parity or authorize shared
+native authority. AAP adoption continues to use each project's verified public
+integration contract.
+
+TC v0.3.15 is published from `c9fc4b3`, containing the `f1374fd` grace timeout
+repair. Source, release-candidate and release-merge CI all passed, including live
+Windows ConPTY, Linux cleanup and delegated cgroup checks. Publication workflow
+`38010160349` completed successfully after a transient crates.io HTTP 429 was
+reconciled against actual missing versions before one failed-job retry. All five
+platform builds and installed-package smokes passed. Independent final registry
+verification confirms all six npm packages and all eight Rust crates at v0.3.15
+(`job_01a1235bd6d6738991d242db11f05a6b`, observed exit 0). Incident #270 is closed
+with original failure and recovery evidence retained.
+
+The installed TC daemon/MCP remains v0.3.14 to preserve active jobs; no SF or AAP
+source was changed. The local full-suite lane remains available to SF. A fresh
+read-only Codex `account/read` check also succeeded. Communication bucket and
+filesystem contracts are committed design proposals; they are not deployed
+cross-room transports. Cleanup retains its full proof requirements and the
+documented terminal Uncertain result at extreme artificial load.

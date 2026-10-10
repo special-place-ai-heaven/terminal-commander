@@ -368,3 +368,75 @@ and daemon/MCP checks. Local live ConPTY was explicitly skipped; fresh remote CI
 must exercise it. The shared full-suite lane was released to SymForge through
 the supported queue. Its dated filesystem/serialization checkpoint is preserved
 with this repair; no sister-project source or installed daemon was changed.
+
+### Final source and release-candidate verification — 2026-10-10
+
+Grace retry commit `f1374fd` passed complete source workflow `38007521962`:
+Linux 1,664 passed / 8 skipped, including the original cleanup test in 0.809
+seconds and all three added deadline regressions; live Windows ConPTY;
+delegated cgroup 28 passed / 1 skipped and accounting marker 1 passed / 145
+skipped; all five platform builds, install smoke and npm packaging. PR #269
+merged normally at `7492ecb`, followed by attribution sentinel `f2b9f20`.
+The entire post-merge source workflow `38008888029` also passed.
+
+The synchronized release candidate `5bee565` contains `f1374fd`. Its reviewed
+14-file diff contains only manifest/version/lockfile/changelog changes, with
+all Cargo and six npm packages aligned to v0.3.15. Complete candidate workflow
+`38009022535` passed: Linux 1,664 / 8 skipped, cleanup in 1.198 seconds,
+live ConPTY, delegated cgroup 28 / 1 and marker 1 / 145 skipped, all five native
+platform builds, Linux install smoke and npm packaging. All eleven check runs
+on that exact head completed successfully. Release PR #267 merged normally at
+`c9fc4b3`; publication workflow `38010160349` then began. Candidate CI success
+and GitHub release metadata are separate from registry publication proof.
+
+The new SymForge native-behavior checkpoint was read after checking its
+00:40 UTC modification time and SHA-256. It is preserved for the closing docs
+commit and retains SF's explicitly open acceptance work. TC has not changed
+sister-project source, AAP source or installed daemons. The local full-suite
+lease is released.
+A fresh read-only Codex bootstrap from the SF workspace also succeeded:
+`account/read`, refreshToken false, account present
+(`job_01a123319dbe720b831ae136f292e8f2`). This proves that routing check at the
+observation time; it is not a promise against future connectivity failures.
+The communication contracts remain design proposals rather than implemented
+cross-room transports. The previously recorded heavy-load Uncertain results
+remain limits on the cleanup proof claim.
+
+### Publication and incident recovery — 2026-10-10
+
+Release v0.3.15 is published from `c9fc4b3`. Its complete release-merge CI
+[`38010160364`](https://github.com/special-place-ai-heaven/terminal-commander/actions/runs/38010160364)
+passed. Publication workflow
+[`38010160349`](https://github.com/special-place-ai-heaven/terminal-commander/actions/runs/38010160349)
+passed after one reconciled failed-job retry. All five native platform builds,
+both Linux presmokes, all six npm publications and all five installed-package
+verification jobs passed before the Rust publication recovery.
+
+The first Rust attempt compiled the store package successfully, then received
+HTTP 429 from crates.io during upload and registry reconciliation. Core, sifters
+and probes had published successfully. A separate fresh registry check confirmed
+store, supervisor, IPC, daemon and MCP versions absent with HTTP 404 before the
+failed jobs were resumed. No source change, version replacement or blind replay
+was used. The existing publisher retained its bounded retries and archive
+checksum reconciliation. The resumed store, supervisor, IPC, daemon and MCP jobs
+all passed, followed by release-verdict; mark-release-broken was correctly skipped.
+The retry watcher completed with observed exit 0
+(`job_01a12357a9cd74e2b022152131f7b91a`).
+
+Independent final registry verification returned true for all six npm packages
+at latest v0.3.15 with integrity metadata and matching root optional dependencies,
+and all eight non-yanked Rust crate versions with checksum metadata. Its TC
+receipt reports observed exit 0 (`job_01a1235bd6d6738991d242db11f05a6b`).
+The [GitHub release](https://github.com/special-place-ai-heaven/terminal-commander/releases/tag/v0.3.15)
+is published, neither draft nor prerelease. Pipeline incident
+[#270](https://github.com/special-place-ai-heaven/terminal-commander/issues/270)
+retains its original failure evidence and the verified recovery record.
+
+SymForge's subsequent 01:09 UTC checkpoint was read after checking modification
+time and SHA-256 `6A51EF77A4B88C8F6919A8891BBB209C6A911D75B61BE6333391F8E73D7A4ABC`.
+Its remaining state-capability, complete-envelope admission, room identity and
+cross-platform acceptance work stays explicitly open under SF ownership. Both
+SF checkpoints are preserved in the closing documentation commit. The installed
+TC daemon/MCP remains v0.3.14 so active sister-project jobs are not terminated;
+published v0.3.15 and verified source are available for the owner-controlled
+upgrade. Communication bucket and filesystem contracts remain design proposals.
