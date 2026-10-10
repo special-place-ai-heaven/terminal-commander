@@ -279,3 +279,92 @@ exercise it. The full-suite lane was released to SymForge through the supported
 queue. Its appended connectivity checkpoint is preserved in this commit;
 SymForge's parity work and draft integration contract remain separately owned
 and are not certified by these TC checks.
+
+### Further graceful-stop delay — 2026-10-10
+
+Repair commit `764e382` passed the complete remote workflow `38004460758`:
+Linux 1,661 / 8 skipped (the live cleanup test passed in 0.095 seconds), live
+Windows ConPTY, delegated-cgroup 28 / 1 skipped plus its accounting marker,
+all five platform builds, install smoke and npm packaging. PR #268 merged
+normally at `a8a96e0`, followed by release-attribution sentinel `d7cebfe`.
+Release PR #267 refreshed and synchronized all package/Cargo versions to
+v0.3.15 at `960140f`.
+
+Fresh release CI `38005961226` on that synchronized head nevertheless failed
+`stopped_command_eventually_reports_completed_cleanup` after 3.134 seconds:
+1,420 passed, one failed, 8 skipped and 240 not run. The enriched assertion
+reported Cancelled / cleanup Running / both streams Reading with zero bytes /
+no exit code / no restart, proving delayed final observation rather than
+terminal uncertain cleanup for this occurrence. Windows passed; downstream
+builds were skipped. v0.3.15 remains unpublished and automatic merge remains
+blocked. The prior narrow procfs repairs retain their demonstrated RED/GREEN
+evidence, but the remaining graceful-stop delay still requires causal tracing.
+No CI retry or deadline change is justified by the earlier passing run.
+
+The post-merge main workflow `38005800308` also failed at 3.061 seconds, and
+sentinel workflow `38005810886` failed at 3.187 seconds, with the same
+Cancelled / Running / Reading / no-exit observation. These separate failures
+supersede the earlier green workflow as evidence for release readiness.
+
+The next investigation traced an additional failure mode. A deterministic
+paused-clock regression first failed before the behavior fix
+(`job_01a12317373973f9990306d4b3f49c25`, exit 100): one TimedOut proof caused
+the grace loop to check only once and sleep through the ten-second grace period.
+Plain four-runner stress and smaller controlled process loads did not reproduce
+it; those negative results were not used to assign a cause to CI.
+
+A controlled Linux workload with 384 owned short-lived filler processes, one
+owned CPU burner and four pinned cancellation workers then reproduced four
+failures at about 3.1 seconds
+(`job_01a123190eef72ac86974e370a645694`, exit 1). Every temporary trace reported
+TimedOut in the grace proof followed by Cancelled / cleanup Running / streams
+Reading / no exit. All helper processes were cleaned up. This establishes a
+causal reproduction of the same lifecycle stall; CI itself had no error-kind
+trace, so its precise internal error remains unobserved.
+
+The repair retries only TimedOut observations using the existing bounded sleep
+cadence and original grace deadline. It sends no extra signals and neither
+extends the 20-ms scan bound nor the ten-second grace or 100-ms final proof
+budget. The later final proof must still freshly establish group quiescence
+before the retained leader can be reaped. Permission, malformed-data and anchor
+errors keep their previous fail-closed treatment. Three paused-clock regressions
+cover recovery through TimedOut and then an incomplete observation, persistent
+timeout through the deadline, and non-timeout failure through the deadline.
+Independent read-only review found no defect in those guards or the final proof
+path. Temporary tracing and repetition knobs are removed from the source diff.
+
+With the repair, four pinned workers completed 400 cancellations under a
+256-filler load while temporary traces showed repeated TimedOut observations
+recovering (`job_01a1231a343d74d18bd37703bc37aa74`, exit 0). The final source
+removed those traces and the repetition knob. Its focused embedded test passed
+(`job_01a1231b2877768ab50f67b6c963c3b7`), five selected grace tests passed
+(`job_01a1231bbde67594aecc203cd99a7e04`), and formatting passed
+(`job_01a1231bc4d872778804cc0900cb2f34`).
+
+The exact 384-filler final-source replay was not fully green
+(`job_01a1231b77dd7306847464b6b95790c5`, exit 1): one of 100 attempts reached
+Uncertain after the final proof budget exhausted, with both streams Complete.
+The other workers passed their 25 attempts. This terminal fail-closed result is
+different from the pre-fix Running/Reading stall, but it prevents a claim that
+all cancellations at that artificial overload can prove Complete. No timeout,
+proof requirement or assertion was relaxed to convert uncertainty into success.
+Full OS gates and a fresh remote workflow remain required for release readiness.
+
+A second already-started bounded replay at that same 384-filler load also
+finished 99/100, with one terminal Uncertain/Complete result and no
+Running/Reading stall (`job_01a1231c310e7048afe1f3c87f2ef524`, exit 1).
+Its helper cleanup was verified. No further identical rerun was used to seek a
+passing receipt.
+
+The final Linux OS gate passed on this source diff
+(`job_01a1231cce83701485c7d9787a336652`, observed exit 0): 1,664 tests passed,
+8 skipped, strict Clippy and formatting, all eight live load checks, and both
+MCP boundary guards. Windows verification follows sequentially; remote ConPTY,
+delegated-cgroup and complete release CI remain separate requirements.
+
+The sequential Windows gate passed
+(`job_01a1231f97597581b0a7b56291ecf6b2`, observed exit 0): 25 selected regressions
+and daemon/MCP checks. Local live ConPTY was explicitly skipped; fresh remote CI
+must exercise it. The shared full-suite lane was released to SymForge through
+the supported queue. Its dated filesystem/serialization checkpoint is preserved
+with this repair; no sister-project source or installed daemon was changed.
