@@ -389,6 +389,17 @@ impl McpDaemonClient {
     /// a still-mismatched daemon replaces it with fresh values. Probe failure
     /// preserves the prior honest skew verdict instead of guessing.
     pub async fn refresh_version_skew(&self, adapter_version: &str) -> Option<(String, String)> {
+        self.refresh_version_skew_within(adapter_version, SKEW_PROBE_TIMEOUT)
+            .await
+    }
+
+    /// [`Self::refresh_version_skew`] with an explicit probe budget, so a test
+    /// of the probe's fallback logic is not at the mercy of host load.
+    async fn refresh_version_skew_within(
+        &self,
+        adapter_version: &str,
+        budget: Duration,
+    ) -> Option<(String, String)> {
         let Some(handle) = &self.status else {
             return None;
         };
@@ -396,7 +407,7 @@ impl McpDaemonClient {
         let _flight = handle.probe_guard.lock().await;
         let prior = handle.version_skew();
         handle.version_probe_count.fetch_add(1, Ordering::Relaxed);
-        let deadline = tokio::time::Instant::now() + SKEW_PROBE_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + budget;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // Health carries the daemon's compile-time version and deliberately
         // avoids SystemDiscover's bounded environment probes. Rechecking skew
@@ -906,7 +917,13 @@ mod tests {
         });
         let client = McpDaemonClient::with_status(&socket, handle.clone());
 
-        let refreshed = client.refresh_version_skew("0.1.85").await;
+        // This test pins the Health -> SystemDiscover fallback, not the
+        // production 750 ms budget. Under a loaded runner two UDS round trips
+        // can exceed that budget and the probe correctly returns the prior
+        // verdict, so give the fallback room to finish and keep the asserts.
+        let refreshed = client
+            .refresh_version_skew_within("0.1.85", Duration::from_secs(30))
+            .await;
         let expected = Some(("0.1.0".to_owned(), "0.1.85".to_owned()));
         assert_eq!(refreshed, expected);
         assert_eq!(handle.version_skew(), expected);
