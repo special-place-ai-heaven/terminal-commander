@@ -3718,6 +3718,8 @@ and their argv_template. Use a native shell route with exec, shell=route.executa
 //
 // Prefers `2026-07-28`; older clients use legacy `initialize`.
 impl ServerHandler for TerminalCommanderMcpServer {
+    // The trait declares `list_tools` as async; this impl has nothing to await.
+    #[allow(clippy::unused_async_trait_impl)]
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,

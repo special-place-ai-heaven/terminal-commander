@@ -91,6 +91,11 @@ doc_lazy_continuation = "allow"
 # write lock across mutation-plus-eviction blocks to keep the
 # observable state consistent. Reconsider at TC32.
 significant_drop_tightening = "allow"
+# `assert_is_empty` (new in Rust 1.99 clippy) wants `assert_eq!(x, [])`,
+# which for typed collections needs an explicit `[] as [T; 0]` cast to
+# compile. That is worse to read than `assert!(x.is_empty())` and weaker
+# for `&str`, so keep the plain form in tests.
+assert_is_empty = "allow"
 
 [profile.dev]
 opt-level = 0
