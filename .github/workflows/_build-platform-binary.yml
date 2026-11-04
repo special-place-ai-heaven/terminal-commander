@@ -68,6 +68,10 @@ jobs:
     env:
       TARGET_TRIPLE: ${{ fromJSON('{"linux-x64":"x86_64-unknown-linux-gnu","linux-arm64":"aarch64-unknown-linux-gnu","windows-x64":"x86_64-pc-windows-msvc","mac-x64":"x86_64-apple-darwin","mac-arm64":"aarch64-apple-darwin"}')[inputs.platform] }}
       PLATFORM_PKG_DIR: packages/terminal-commander-${{ inputs.platform }}
+      # The self-hosted runner environment sets RUSTC_WRAPPER=sccache but the
+      # image has no sccache; empty makes cargo run rustc directly. No effect
+      # on the GitHub-hosted runners, which do not set it.
+      RUSTC_WRAPPER: ""
       EXE_SUFFIX: ${{ inputs.platform == 'windows-x64' && '.exe' || '' }}
     steps:
       - name: Checkout

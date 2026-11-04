@@ -89,6 +89,9 @@ jobs:
     env:
       RUST_TOOLCHAIN: "1.99.1"
       NODE_VERSION: "20"
+      # The self-hosted runner environment sets RUSTC_WRAPPER=sccache but the
+      # image has no sccache; an empty value makes cargo run rustc directly.
+      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -155,6 +158,7 @@ jobs:
       contents: read
     env:
       RUST_TOOLCHAIN: "1.99.1"
+      RUSTC_WRAPPER: ""   # see pre-build-gates: no sccache on the self-hosted image
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
