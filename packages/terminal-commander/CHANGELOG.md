@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.16](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.15...v0.3.16) (2026-11-04)
+
+
+### Bug Fixes
+
+* **probes:** give the cleanup proof budgets a loaded host can meet ([#275](https://github.com/special-place-ai-heaven/terminal-commander/issues/275)) ([56ef404](https://github.com/special-place-ai-heaven/terminal-commander/commit/56ef404953b6cec78921c34e53620c8a3a3e95aa))
+
 ## [0.3.15](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.14...v0.3.15) (2026-10-10)
 
 
