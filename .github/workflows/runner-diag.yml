@@ -24,3 +24,10 @@ jobs:
           echo "== cgroup"; cat /sys/fs/cgroup/cgroup.controllers 2>&1 | head -1; stat -fc %T /sys/fs/cgroup 2>&1; ls -ld /sys/fs/cgroup 2>&1
           echo "== resources"; nproc; free -g | sed -n 2p; df -h / | tail -1; ulimit -n
           echo "== docker"; docker version --format '{{.Server.Version}}' 2>&1 | head -2
+          echo "== zombie experiment"
+          echo "pid1: $(cat /proc/1/comm) | $(tr '\0' ' ' < /proc/1/cmdline | cut -c1-80)"
+          sh -c 'sleep 300 & echo $! > /tmp/orphan.pid'
+          sleep 1; pid=$(cat /tmp/orphan.pid); echo "orphan pid=$pid ppid=$(awk '{print $4}' /proc/$pid/stat)"
+          kill -9 "$pid"; sleep 1
+          echo "after SIGKILL: state=$(awk '{print $3}' /proc/$pid/stat 2>&1)"
+          if kill -0 "$pid" 2>/dev/null; then echo "kill -0 => ALIVE"; else echo "kill -0 => gone"; fi
