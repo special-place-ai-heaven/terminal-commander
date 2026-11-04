@@ -1,0 +1,26 @@
+# Throwaway diagnostic: what does the self-hosted Linux runner provide?
+# Runs only on a push to exp/runner-diag. Prints machine facts, never secrets.
+name: runner-diag
+on:
+  push:
+    branches: [exp/runner-diag]
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: [self-hosted, linux, x64, fresh]
+    timeout-minutes: 5
+    steps:
+      - name: facts
+        run: |
+          set +e
+          echo "== os"; . /etc/os-release; echo "$PRETTY_NAME"; uname -m; ldd --version | head -1
+          echo "== user"; id; sudo -n true >/dev/null 2>&1; echo "sudo -n rc=$?"
+          echo "== tools"
+          for t in jq curl tar xz gzip unzip git python3 pip3 node npm make cc gcc clang docker podman systemctl script bash; do
+            printf "%-10s" "$t"; command -v "$t" || echo MISSING
+          done
+          echo "== container?"; ls /.dockerenv 2>&1 | head -1; head -3 /proc/1/cgroup; head -3 /proc/self/cgroup
+          echo "== cgroup"; cat /sys/fs/cgroup/cgroup.controllers 2>&1 | head -1; stat -fc %T /sys/fs/cgroup 2>&1; ls -ld /sys/fs/cgroup 2>&1
+          echo "== resources"; nproc; free -g | sed -n 2p; df -h / | tail -1; ulimit -n
+          echo "== docker"; docker version --format '{{.Server.Version}}' 2>&1 | head -2
