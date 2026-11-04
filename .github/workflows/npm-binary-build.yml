@@ -83,12 +83,20 @@ env:
 jobs:
   pre-build-gates:
     name: pre-build-gates (linux-x64)
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux, x64, fresh]
     permissions:
       contents: read
     env:
       RUST_TOOLCHAIN: "1.99.1"
       NODE_VERSION: "20"
+      # The self-hosted runner environment sets RUSTC_WRAPPER=sccache but the
+      # image has no sccache; an empty value makes cargo run rustc directly.
+      RUSTC_WRAPPER: ""
+      # nextest runs one test per CPU by default. The self-hosted host has 28
+      # and several jobs share it, so ~28-way parallelism per job starved
+      # daemon start-up past the CLI tests' 5 s bind wait. Cap it near what the
+      # 4-core hosted runners ran.
+      NEXTEST_TEST_THREADS: "8"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -105,6 +113,7 @@ jobs:
       - name: root wrapper unit tests (clean checkout)
         working-directory: packages/terminal-commander
         run: npm test
+      - uses: ./.github/actions/ensure-jq
       - uses: taiki-e/install-action@nextest
       - uses: taiki-e/install-action@cargo-deny
       - name: supply-chain gate (cargo deny check)
@@ -148,6 +157,10 @@ jobs:
   install-path-linux:
     name: install-path-linux
     needs: pre-build-gates
+    # Stays on a GitHub-hosted runner on purpose: this check exercises the
+    # image's SYSTEM node (autostart.sh runs the npm shims with a fixed system
+    # PATH), and the self-hosted runner image has no system-wide node. Move it
+    # once that image installs nodejs system-wide.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -183,6 +196,9 @@ jobs:
   # the gates takes the rlimit lane and prints a skip. The script puts the
   # process in a leaf cgroup under a delegated, user-owned parent (the systemd
   # app.slice layout) and fails unless the tests report cgroup mode.
+  # Stays on a GitHub-hosted runner: the self-hosted Linux runners run inside
+  # a container whose cgroup root is root-owned, so no user-owned delegated
+  # cgroup can be created there.
   governor-cgroup-linux:
     name: governor-cgroup-linux
     needs: pre-build-gates
@@ -251,7 +267,7 @@ jobs:
       - build-windows-x64
       - build-mac-x64
       - build-mac-arm64
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux, x64, fresh]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
