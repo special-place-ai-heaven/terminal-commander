@@ -46,7 +46,7 @@ bans, licenses, sources; policy in `deny.toml`), then `bash
 scripts/linux-gate.sh`, which:
 
 1. checks the toolchain: `cargo`, `node`, `cargo-nextest`, `python3`
-   present; `rustc` equals `rust-toolchain.toml` channel (1.97.1) and the
+   present; `rustc` equals `rust-toolchain.toml` channel (1.99.1) and the
    workflow `RUST_TOOLCHAIN` pin;
 2. `node scripts/release/verify-optional-dependencies.js` and
    `bash scripts/release/test-synthesize-crates-release-trigger.sh`;

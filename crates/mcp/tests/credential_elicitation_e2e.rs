@@ -108,6 +108,8 @@ impl ClientHandler for OwnerClient {
         Ok(ElicitResult::new(ElicitationAction::Accept))
     }
 
+    // The trait declares this handler as async; it has nothing to await.
+    #[allow(clippy::unused_async_trait_impl)]
     async fn on_custom_notification(
         &self,
         notification: CustomNotification,

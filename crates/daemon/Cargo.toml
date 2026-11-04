@@ -34,7 +34,7 @@ terminal-commander-sifters.workspace = true
 terminal-commander-probes.workspace = true
 terminal-commander-store.workspace = true
 terminal-commander-ipc.workspace = true
-terminal-commander-supervisor = { path = "../supervisor", version = "0.3.15" } # x-release-please-version
+terminal-commander-supervisor = { path = "../supervisor", version = "0.3.16" } # x-release-please-version
 uuid = { workspace = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -97,6 +97,7 @@ doc_markdown = "allow"
 doc_overindented_list_items = "allow"
 doc_lazy_continuation = "allow"
 significant_drop_tightening = "allow"
+assert_is_empty = "allow"      # mirrors the workspace table; see root Cargo.toml
 
 [dev-dependencies]
 tempfile = "3"
