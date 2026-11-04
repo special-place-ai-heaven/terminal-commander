@@ -78,10 +78,10 @@ fn peer_metadata(peer: &PeerIdentity) -> serde_json::Value {
 pub(in crate::ipc::server) fn identity_audit_subject(identity: &PeerIdentity) -> String {
     match identity {
         PeerIdentity::Unix { uid, pid, .. } => {
-            format!("uid={uid}:pid={}", pid.map_or(0, |p| p))
+            format!("uid={uid}:pid={}", pid.unwrap_or(0))
         }
         PeerIdentity::Windows { sid, pid, .. } => {
-            format!("sid={sid}:pid={}", pid.map_or(0, |p| p))
+            format!("sid={sid}:pid={}", pid.unwrap_or(0))
         }
         PeerIdentity::Unknown { .. } => "unknown_peer".to_owned(),
     }

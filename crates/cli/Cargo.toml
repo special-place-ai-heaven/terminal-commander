@@ -48,6 +48,7 @@ doc_markdown = "allow"
 doc_overindented_list_items = "allow"
 doc_lazy_continuation = "allow"
 significant_drop_tightening = "allow"
+assert_is_empty = "allow"      # mirrors the workspace table; see root Cargo.toml
 
 # `session reap` integration tests spawn a real `terminal-commanderd`
 # binary via `env!("CARGO_BIN_EXE_terminal-commanderd")`. Cargo only

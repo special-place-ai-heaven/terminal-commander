@@ -9,7 +9,7 @@
 [![npm](https://img.shields.io/npm/v/terminal-commander?label=npm&color=cb3837)](https://www.npmjs.com/package/terminal-commander)
 [![CI](https://github.com/special-place-ai-heaven/terminal-commander/actions/workflows/npm-binary-build.yml/badge.svg)](https://github.com/special-place-ai-heaven/terminal-commander/actions/workflows/npm-binary-build.yml)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](./LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](./rust-toolchain.toml)
+[![Rust](https://img.shields.io/badge/rust-1.99.1-orange?logo=rust)](./rust-toolchain.toml)
 [![MCP](https://img.shields.io/badge/protocol-MCP-8A2BE2)](https://modelcontextprotocol.io)
 [![Platforms](https://img.shields.io/badge/platforms-win--x64%20%7C%20linux--x64%20%7C%20linux--arm64%20%7C%20mac--arm64%20%7C%20mac--x64-555)](#platform-support)
 

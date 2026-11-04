@@ -1323,7 +1323,7 @@ async fn handle_self_check(state: &Arc<DaemonState>) -> IpcResponse {
     let mut lines = vec![
         format!("data_dir: {}", state.config.daemon.data_dir.display()),
         format!("policy_profile: {:?}", state.policy.profile),
-        format!("audit: persistent (TC35)"),
+        "audit: persistent (TC35)".to_string(),
     ];
     match state.store.audit_count() {
         Ok(n) => lines.push(format!("audit_count: {n}")),
