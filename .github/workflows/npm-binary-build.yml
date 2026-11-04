@@ -87,7 +87,7 @@ jobs:
     permissions:
       contents: read
     env:
-      RUST_TOOLCHAIN: "1.97.1"
+      RUST_TOOLCHAIN: "1.99.1"
       NODE_VERSION: "20"
     steps:
       - uses: actions/checkout@v7
@@ -118,7 +118,7 @@ jobs:
     permissions:
       contents: read
     env:
-      RUST_TOOLCHAIN: "1.97.1"
+      RUST_TOOLCHAIN: "1.99.1"
       NODE_VERSION: "20"
     steps:
       - uses: actions/checkout@v7
@@ -153,7 +153,7 @@ jobs:
     permissions:
       contents: read
     env:
-      RUST_TOOLCHAIN: "1.97.1"
+      RUST_TOOLCHAIN: "1.99.1"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -191,7 +191,7 @@ jobs:
     permissions:
       contents: read
     env:
-      RUST_TOOLCHAIN: "1.97.1"
+      RUST_TOOLCHAIN: "1.99.1"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
