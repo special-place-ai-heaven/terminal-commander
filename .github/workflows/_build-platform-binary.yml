@@ -43,26 +43,26 @@ env:
 jobs:
   build:
     name: build-${{ inputs.platform }}
-    # All 5 platforms use NATIVE runners. cargo-zigbuild was the prior
-    # plan, but Apple's macOS SDK is not legally redistributable and the
-    # public `cargo-zigbuild` Docker images bundling it have a murky
-    # licence story. GitHub-hosted macOS runners ship the SDK by default.
+    # Runner policy: linux-x64 runs on the owner's self-hosted `fresh`
+    # Linux runners (current Ubuntu). GitHub-hosted runners cover Windows,
+    # macOS (Apple's SDK is not legally redistributable, so macOS stays on
+    # native GitHub runners) and linux-arm64 (an X64 host cannot run the
+    # arm64 --version smoke below).
     #
-    # LINUX GLIBC FLOOR: linux-x64/linux-arm64 pin ubuntu-22.04 (glibc
-    # 2.35) ON PURPOSE. A native cargo build links the host glibc as the
-    # binary's MINIMUM required version; building on ubuntu-24.04 (glibc
-    # 2.39) shipped binaries that fail on Debian 12 bookworm (2.36),
-    # Ubuntu 22.04 (2.35), and older (v0.1.13 verify-linux-* failed with
-    # "GLIBC_2.39 not found"). Do NOT bump linux to 24.04. When 22.04
-    # hosted runners are retired, switch linux to cargo-zigbuild with a
-    # pinned gnu.2.x target rather than a newer native runner. The
-    # post-staging objdump guard below enforces the <=2.35 floor.
+    # LINUX GLIBC FLOOR: the shipped linux binaries must run on Ubuntu 22.04
+    # (glibc 2.35) and Debian 12 (2.36). A native cargo build links the host
+    # glibc as the binary's MINIMUM required version; building on Ubuntu 24.04
+    # (glibc 2.39) shipped binaries that fail there (v0.1.13 verify-linux-*
+    # failed with "GLIBC_2.39 not found"). Linux is therefore built with
+    # `cargo zigbuild --target <triple>.2.35`, which pins the glibc symbol
+    # versions whatever the build host is, so no old Ubuntu runner is needed.
+    # The post-staging objdump guard below enforces the <=2.35 floor.
     #
     # Runner labels (verified 2026-05-25):
     #   - macos-13 was retired 2025-12-04. Use macos-15-intel for Intel.
     #   - macos-14 still active for Apple Silicon (M1+).
     # When GitHub deprecates either, see runbook §"macOS runner deprecation".
-    runs-on: ${{ fromJSON('{"linux-x64":"ubuntu-22.04","linux-arm64":"ubuntu-22.04-arm","windows-x64":"windows-2022","mac-x64":"macos-15-intel","mac-arm64":"macos-14"}')[inputs.platform] }}
+    runs-on: ${{ fromJSON('{"linux-x64":["self-hosted","linux","x64","fresh"],"linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022","mac-x64":"macos-15-intel","mac-arm64":"macos-14"}')[inputs.platform] }}
     outputs:
       artifact_name: ${{ steps.meta.outputs.artifact_name }}
     env:
@@ -79,6 +79,22 @@ jobs:
           toolchain: ${{ inputs.rust_toolchain }}
           targets: ${{ env.TARGET_TRIPLE }}
 
+      # Linux builds use cargo-zigbuild (see the glibc-floor note above). The
+      # self-hosted runner has no jq and no sudo, which install-action needs.
+      - name: Ensure jq (self-hosted Linux has none)
+        if: startsWith(inputs.platform, 'linux')
+        uses: ./.github/actions/ensure-jq
+
+      - name: Install zig (linux, for cargo-zigbuild)
+        if: startsWith(inputs.platform, 'linux')
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install cargo-zigbuild (linux)
+        if: startsWith(inputs.platform, 'linux')
+        uses: taiki-e/install-action@cargo-zigbuild
+
       # Capture the GitHub runner image revision (e.g. "20260525.156"). It is
       # baked into the cache key below so a target/ populated under one image
       # can NEVER be restored under another. This closes the glibc-floor
@@ -93,7 +109,9 @@ jobs:
       - name: Capture runner image version for cache key
         id: imgver
         shell: bash
-        run: echo "image=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+        # Self-hosted runners set no ImageVersion; fall back to the distro
+        # release so the cache key still changes when the host OS does.
+        run: echo "image=${ImageVersion:-$(. /etc/os-release 2>/dev/null; echo "${ID:-unknown}-${VERSION_ID:-0}")}" >> "$GITHUB_OUTPUT"
 
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
@@ -111,11 +129,17 @@ jobs:
           # repartitioned key takes over. Bump again only to force a hard reset.
           prefix-key: v1-rust
 
-      - name: cargo build --release (native on every platform)
+      - name: cargo build --release (cargo zigbuild on linux, native elsewhere)
         shell: bash
         run: |
-          cargo build --release \
-            --target ${{ env.TARGET_TRIPLE }} \
+          set -euo pipefail
+          if [[ "${{ inputs.platform }}" == linux-* ]]; then
+            # `.2.35` pins the glibc symbol versions, whatever the build host.
+            build=(cargo zigbuild --release --target "${TARGET_TRIPLE}.2.35")
+          else
+            build=(cargo build --release --target "${TARGET_TRIPLE}")
+          fi
+          "${build[@]}" \
             -p terminal-commanderd \
             -p terminal-commander-mcp \
             -p terminal-commander-cli
@@ -147,10 +171,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Native cargo build links the host glibc as the binary's
-          # minimum. We build on ubuntu-22.04 (glibc 2.35); assert no
-          # staged binary slipped in a higher requirement (e.g. a runner
-          # image bump). sort -V is a numeric version comparator, so
+          # A native cargo build links the host glibc as the binary's
+          # minimum. Linux is built with cargo zigbuild pinned to glibc 2.35;
+          # assert no staged binary slipped in a higher requirement (e.g. a
+          # build that bypassed zigbuild). sort -V is a numeric version comparator, so
           # 2.39 > 2.35 > 2.4 order correctly (NOT a lexical sort).
           floor="2.35"
           bin_dir="${PLATFORM_PKG_DIR}/bin"
@@ -168,7 +192,7 @@ jobs:
             fi
             highest=$(printf '%s\n%s\n' "$maxg" "$floor" | sort -V | tail -1)
             if [ "$highest" != "$floor" ]; then
-              echo "::error::$bin requires GLIBC_${maxg}, above the ${floor} floor (build host glibc leaked into the binary; do not build linux on a runner newer than ubuntu-22.04)"
+              echo "::error::$bin requires GLIBC_${maxg}, above the ${floor} floor (build host glibc leaked into the binary; build linux with cargo zigbuild --target <triple>.2.35)"
               fail=1
             else
               echo "$bin: max GLIBC_${maxg} <= ${floor} OK"

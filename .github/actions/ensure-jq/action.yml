@@ -1,0 +1,28 @@
+name: ensure-jq
+description: >
+  Provide jq on a runner that lacks it. GitHub-hosted images ship jq; the
+  self-hosted Linux runners have no jq and no sudo, and taiki-e/install-action
+  needs jq, so fetch a pinned, checksum-verified static binary into the user's
+  PATH. A no-op when jq is already present.
+runs:
+  using: composite
+  steps:
+    - name: Ensure jq
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v jq >/dev/null 2>&1; then
+          echo "jq already present: $(command -v jq)"
+          exit 0
+        fi
+        # Only the X64 self-hosted runners lack jq; arm64 hosted images ship it.
+        [ "$(uname -m)" = "x86_64" ] || { echo "::error::no jq and no pinned build for $(uname -m)"; exit 1; }
+        ver="1.7.1"
+        sha="5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5"
+        dir="${HOME}/.local/bin"
+        mkdir -p "$dir"
+        curl -fsSL -o "$dir/jq" "https://github.com/jqlang/jq/releases/download/jq-${ver}/jq-linux-amd64"
+        echo "${sha}  $dir/jq" | sha256sum -c -
+        chmod +x "$dir/jq"
+        echo "$dir" >> "$GITHUB_PATH"
+        "$dir/jq" --version
