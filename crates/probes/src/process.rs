@@ -38,6 +38,20 @@ use tokio::sync::oneshot;
 /// Default grace window between graceful and forced termination.
 pub const DEFAULT_GRACE: Duration = Duration::from_secs(10);
 
+/// How long the post-kill cleanup proof keeps polling for a quiescent group
+/// before it reports `Uncertain`. Both ends are wall-clock, and a starved host
+/// stretches them: CI traced three attempts in 200 ms, every one `TimedOut`,
+/// with the process already gone. The poll returns the moment the group is
+/// proven stopped, so this only bounds the failure case.
+const STOP_PROOF_BUDGET: Duration = Duration::from_secs(2);
+
+/// Longest a single `/proc` membership scan may run before it reports
+/// `TimedOut` (so a huge `/proc` cannot pin an async worker). A scan that is
+/// descheduled mid-way counts wall time, so this must exceed what a loaded host
+/// needs for an ordinary scan; the 32 768-entry cap still bounds the work.
+#[cfg(target_os = "linux")]
+const GROUP_SCAN_BUDGET: Duration = Duration::from_millis(100);
+
 /// Per-probe configuration.
 #[derive(Debug, Clone)]
 pub struct ProcessProbeConfig {
@@ -501,7 +515,7 @@ fn group_quiescent(pgid: u32) -> std::io::Result<bool> {
         // The unreaped leader pins PGID throughout this scan. A zombie-only group
         // is stopped; kill(-pgid, 0) cannot distinguish it from runnable members.
         // Any unreadable, malformed, or incomplete scan fails closed.
-        let deadline = std::time::Instant::now() + Duration::from_millis(20);
+        let deadline = std::time::Instant::now() + GROUP_SCAN_BUDGET;
         let mut anchor_seen = false;
         for (index, entry) in std::fs::read_dir("/proc")?.enumerate() {
             if index >= 32_768 || std::time::Instant::now() >= deadline {
@@ -700,7 +714,7 @@ fn job_quiescent(job: Option<&JobHandle>) -> std::io::Result<bool> {
 }
 
 async fn wait_stopped(mut check: impl FnMut() -> std::io::Result<bool>) -> std::io::Result<bool> {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    let deadline = tokio::time::Instant::now() + STOP_PROOF_BUDGET;
     let mut last_timeout = None;
     loop {
         match check() {
@@ -721,7 +735,7 @@ async fn wait_stopped(mut check: impl FnMut() -> std::io::Result<bool>) -> std::
 fn wait_stopped_blocking(
     mut check: impl FnMut() -> std::io::Result<bool>,
 ) -> std::io::Result<bool> {
-    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+    let deadline = std::time::Instant::now() + STOP_PROOF_BUDGET;
     loop {
         if check()? {
             return Ok(true);
@@ -1486,6 +1500,27 @@ mod ownership_cleanup_tests {
 
         assert_eq!(checks, 1);
         assert!(tokio::time::Instant::now() - started >= grace);
+    }
+
+    /// A starved host stretches both the `/proc` scan and the 5 ms sleep between
+    /// attempts (CI traces showed three attempts in 200 ms, all `TimedOut`). The
+    /// proof must keep polling for far longer than that before it gives up, and
+    /// report success the moment one attempt completes.
+    #[tokio::test(start_paused = true)]
+    async fn wait_stopped_outlasts_a_starved_host() {
+        let mut checks = 0;
+        let stopped = wait_stopped(|| {
+            checks += 1;
+            if checks <= 30 {
+                Err(std::io::ErrorKind::TimedOut.into())
+            } else {
+                Ok(true)
+            }
+        })
+        .await;
+
+        assert!(matches!(stopped, Ok(true)));
+        assert_eq!(checks, 31);
     }
 
     #[tokio::test(start_paused = true)]
