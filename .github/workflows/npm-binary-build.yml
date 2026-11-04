@@ -152,13 +152,16 @@ jobs:
   install-path-linux:
     name: install-path-linux
     needs: pre-build-gates
-    runs-on: [self-hosted, linux, x64, fresh]
+    # Stays on a GitHub-hosted runner on purpose: this check exercises the
+    # image's SYSTEM node (autostart.sh runs the npm shims with a fixed system
+    # PATH), and the self-hosted runner image has no system-wide node. Move it
+    # once that image installs nodejs system-wide.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
     env:
       RUST_TOOLCHAIN: "1.99.1"
-      RUSTC_WRAPPER: ""   # see pre-build-gates: no sccache on the self-hosted image
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
