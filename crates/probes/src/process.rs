@@ -700,18 +700,33 @@ fn job_quiescent(job: Option<&JobHandle>) -> std::io::Result<bool> {
 }
 
 async fn wait_stopped(mut check: impl FnMut() -> std::io::Result<bool>) -> std::io::Result<bool> {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_millis(100);
     let mut last_timeout = None;
+    let mut trace: Vec<String> = Vec::new();
     loop {
-        match check() {
+        let result = check();
+        trace.push(format!(
+            "{}ms:{}",
+            started.elapsed().as_millis(),
+            match &result {
+                Ok(stopped) => format!("ok({stopped})"),
+                Err(error) => format!("err({:?}/{:?})", error.kind(), error.raw_os_error()),
+            }
+        ));
+        match result {
             Ok(true) => return Ok(true),
             Ok(false) => {}
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
                 last_timeout = Some(error);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                eprintln!("TC-DIAG wait_stopped non-timeout error: {trace:?}");
+                return Err(error);
+            }
         }
         if tokio::time::Instant::now() >= deadline {
+            eprintln!("TC-DIAG wait_stopped gave up at deadline: {trace:?}");
             return last_timeout.map_or(Ok(false), Err);
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
