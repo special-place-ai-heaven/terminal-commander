@@ -92,6 +92,11 @@ jobs:
       # The self-hosted runner environment sets RUSTC_WRAPPER=sccache but the
       # image has no sccache; an empty value makes cargo run rustc directly.
       RUSTC_WRAPPER: ""
+      # nextest runs one test per CPU by default. The self-hosted host has 28
+      # and several jobs share it, so ~28-way parallelism per job starved
+      # daemon start-up past the CLI tests' 5 s bind wait. Cap it near what the
+      # 4-core hosted runners ran.
+      NEXTEST_TEST_THREADS: "8"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
