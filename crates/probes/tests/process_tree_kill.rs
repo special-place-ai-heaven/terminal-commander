@@ -173,6 +173,36 @@ fn unix_grandchild_is_killed_on_cancel() {
 /// grandchild PID cannot be resolved (timing/parsing), we fall back to
 /// asserting only that the probe resolves `Cancelled` and document that the
 /// Job Object guarantees tree teardown.
+/// A killed but unreaped process (a zombie) is dead. `kill -0` still succeeds
+/// on one, and a container with no init to reap orphans leaves every killed
+/// grandchild a zombie, so `pid_alive_unix` must not count it as alive.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_zombie_is_not_alive() {
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn `true`");
+    let pid = child.id();
+    // Wait until it has exited WITHOUT reaping it (no wait() yet).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let is_zombie = || {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+            s.rsplit(')')
+                .next()
+                .is_some_and(|r| r.trim_start().starts_with('Z'))
+        })
+    };
+    while !is_zombie() {
+        assert!(
+            Instant::now() < deadline,
+            "child {pid} never became a zombie"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!pid_alive_unix(pid), "zombie {pid} must not count as alive");
+    child.wait().expect("reap the zombie");
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_grandchild_is_killed_on_cancel() {
@@ -298,6 +328,15 @@ fn scan_ring_for_pid(
 /// `kill -0 <pid>` semantics via the `kill(1)` tool (no libc): exit 0 == alive.
 #[cfg(unix)]
 fn pid_alive_unix(pid: u32) -> bool {
+    // `kill -0` succeeds for a zombie (killed, not yet reaped). Where nothing
+    // reaps orphans (a container whose PID 1 is not an init) a killed
+    // grandchild stays a zombie for good, and the product's own cleanup proof
+    // already counts a zombie as stopped. So on Linux read the state instead.
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        && let Some(state) = stat.rsplit(')').next().map(str::trim_start)
+    {
+        return !(state.starts_with('Z') || state.starts_with('X'));
+    }
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
         .stdout(std::process::Stdio::null())
