@@ -253,6 +253,68 @@ test("update re-runs setup with the launcher in npm's own global root (custom pr
   assert.equal(setupSpawn.args[0], fakeEntry);
 });
 
+// Install a copy of this package (bin, lib, package.json) at
+// <tmp>/old/node_modules/terminal-commander and run ITS `update`, with npm's
+// global root answered as `npmRoot(tmpDir, oldModules)`.
+function runUpdateFromInstalledCopy(npmRoot) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tc-update-stale-"));
+  try {
+    const oldModules = path.join(tmpDir, "old", "node_modules");
+    const oldRoot = path.join(oldModules, "terminal-commander");
+    for (const part of ["bin", "lib", "package.json"]) {
+      fs.cpSync(path.join(PKG_ROOT, part), path.join(oldRoot, part), { recursive: true });
+    }
+    const recordPath = path.join(tmpDir, "spawns.json");
+    fs.writeFileSync(recordPath, "[]", "utf8");
+    const injector = makeSpawnRecorder(tmpDir, recordPath);
+    const root = npmRoot(tmpDir, oldModules);
+    const env = { ...process.env, __TEST_NPM_EXIT__: "0", __TEST_NPM_ROOT__: root };
+    const result = spawnSync(
+      process.execPath,
+      ["--require", injector, path.join(oldRoot, "bin", "terminal-commander.js"), "update"],
+      { encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"], shell: false, env },
+    );
+    return {
+      result,
+      oldRoot: fs.realpathSync(oldRoot),
+      oldPrefix: fs.realpathSync(path.join(tmpDir, "old")),
+    };
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+test("update warns when the launcher that ran is a stale copy, not the one npm updated", () => {
+  let newRoot = null;
+  const { result, oldRoot, oldPrefix } = runUpdateFromInstalledCopy((tmpDir) => {
+    const modules = path.join(tmpDir, "new", "lib", "node_modules");
+    const entry = makeFakeGlobalLauncher(path.join(tmpDir, "new"));
+    fs.writeFileSync(
+      path.join(path.dirname(path.dirname(entry)), "package.json"),
+      JSON.stringify({ name: "terminal-commander", version: "99.0.0" }),
+      "utf8",
+    );
+    newRoot = fs.realpathSync(path.join(modules, "terminal-commander"));
+    return modules;
+  });
+  const pkgVersion = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, "package.json"), "utf8")).version;
+  assert.equal(result.status, 0, `a stale launcher must not fail the update; stderr=${result.stderr}`);
+  assert.ok(result.stderr.includes(`${pkgVersion} at ${oldRoot}`), result.stderr);
+  assert.ok(result.stderr.includes(`99.0.0 at ${newRoot}`), result.stderr);
+  assert.ok(
+    result.stderr.includes(`npm uninstall -g terminal-commander --prefix "${oldPrefix}"`),
+    result.stderr,
+  );
+  assert.equal(result.stderr.includes("harness setup was not re-run"), false, result.stderr);
+});
+
+test("update does not warn when the launcher that ran is the one npm updated", () => {
+  const { result } = runUpdateFromInstalledCopy((_tmpDir, oldModules) => oldModules);
+  assert.equal(result.status, 0, `stderr=${result.stderr}`);
+  assert.equal(result.stderr.includes("npm uninstall"), false, result.stderr);
+  assert.equal(result.stderr.includes("warning"), false, result.stderr);
+});
+
 test("update says plainly why setup was not re-run when npm cannot report its root", () => {
   const { result, spawns } = runUpdateWithNpmRoot(null);
   assert.equal(result.status, 0, "a successful install must not turn into a failure");
