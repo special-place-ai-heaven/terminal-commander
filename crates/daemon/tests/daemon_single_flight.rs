@@ -106,6 +106,25 @@ async fn endpoint_answers_health(state_dir: &Path, endpoint: &Endpoint) -> bool 
     )
 }
 
+/// A live daemon answers Health, but one probe is capped at 200 ms of wall
+/// clock, which a loaded host can miss while the daemon is perfectly healthy.
+/// Poll until it answers or a generous deadline passes. A daemon that was
+/// really orphaned or killed never answers, so it still fails after the
+/// deadline. Use this for "the daemon answers"; keep the single probe for
+/// "nothing answers".
+async fn endpoint_eventually_answers_health(state_dir: &Path, endpoint: &Endpoint) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if endpoint_answers_health(state_dir, endpoint).await {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Best-effort: kill the daemon recorded in the pidfile and clean up.
 async fn teardown(state_dir: &Path) {
     if let Some(rec) = pidfile::read_pidfile(state_dir) {
@@ -158,7 +177,7 @@ async fn two_ensure_daemon_cold_starts_converge_on_one_live_daemon() {
     );
 
     assert!(
-        endpoint_answers_health(&state_dir, &endpoint).await,
+        endpoint_eventually_answers_health(&state_dir, &endpoint).await,
         "endpoint should answer Health after single-flight bring-up"
     );
 
@@ -217,7 +236,7 @@ async fn second_daemon_does_not_orphan_first() {
         "first daemon did not write its pidfile within 10s"
     );
     assert!(
-        endpoint_answers_health(&state_dir, &endpoint).await,
+        endpoint_eventually_answers_health(&state_dir, &endpoint).await,
         "first daemon should answer Health before the second is launched"
     );
     // Capture the socket inode so we can detect an orphaning rebind
@@ -250,7 +269,7 @@ async fn second_daemon_does_not_orphan_first() {
         "socket inode changed — the second daemon rebound and orphaned the first"
     );
     assert!(
-        endpoint_answers_health(&state_dir, &endpoint).await,
+        endpoint_eventually_answers_health(&state_dir, &endpoint).await,
         "the (first) daemon should still answer Health"
     );
     assert!(
@@ -397,7 +416,7 @@ async fn a_daemon_refuses_a_socket_another_daemon_serves() {
 
     let second = exit_of(raw_daemon(&second_dir, &endpoint)).await;
     let ino_after = std::fs::metadata(&sock).map(|m| m.ino()).ok();
-    let first_serves = endpoint_answers_health(&first_dir, &endpoint).await;
+    let first_serves = endpoint_eventually_answers_health(&first_dir, &endpoint).await;
     let _ = first.kill();
     let _ = first.wait();
     teardown(&first_dir).await;
@@ -446,7 +465,7 @@ async fn a_daemon_keeps_serving_after_sighup() {
         status.is_some()
     })
     .await;
-    let answers = !died && endpoint_answers_health(&state_dir, &endpoint).await;
+    let answers = !died && endpoint_eventually_answers_health(&state_dir, &endpoint).await;
 
     let stopped = !died && signal("TERM") && {
         poll_until(Instant::now() + Duration::from_secs(10), || {
