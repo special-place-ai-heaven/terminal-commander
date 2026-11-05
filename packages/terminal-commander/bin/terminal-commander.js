@@ -242,6 +242,43 @@ function globalLauncherEntry() {
   return { entry, reason: null };
 }
 
+// npm updated the copy in its global root, but the launcher that ran may be an
+// older copy earlier on PATH (e.g. C:\Program Files\nodejs\node_modules while
+// npm's root is %APPDATA%\npm\node_modules); `--version` would keep printing the
+// old version. Say so, with the command that removes the stale copy. Only for a
+// real install (parent dir is node_modules), never a dev checkout. Best-effort.
+function warnIfStaleLauncher(installedRoot) {
+  try {
+    const running = fs.realpathSync(path.resolve(__dirname, ".."));
+    if (path.basename(path.dirname(running)) !== "node_modules") return;
+    const installed = fs.realpathSync(installedRoot);
+    const same =
+      process.platform === "win32"
+        ? running.toLowerCase() === installed.toLowerCase()
+        : running === installed;
+    if (same) return;
+    let installedVersion = "unknown";
+    try {
+      installedVersion = JSON.parse(
+        fs.readFileSync(path.join(installed, "package.json"), "utf8"),
+      ).version || "unknown";
+    } catch (_e) {
+      /* keep "unknown" */
+    }
+    let prefix = path.dirname(path.dirname(running));
+    if (process.platform !== "win32" && path.basename(prefix) === "lib") {
+      prefix = path.dirname(prefix);
+    }
+    process.stderr.write(
+      `terminal-commander: warning: the launcher you ran (${pkg.version} at ${running}) is not the one npm just updated (${installedVersion} at ${installed}).\n` +
+        "terminal-commander: an older copy is earlier on PATH and will keep running. Remove it with:\n" +
+        `  npm uninstall -g terminal-commander --prefix "${prefix}"\n`,
+    );
+  } catch (_e) {
+    /* never turn a successful update into a failure */
+  }
+}
+
 // Re-run `setup harness` with the freshly-installed launcher. Always invokes
 // `done` (success or not) so a setup hiccup never fails the update.
 function reregisterHarnesses(done) {
@@ -253,6 +290,7 @@ function reregisterHarnesses(done) {
     done();
     return;
   }
+  warnIfStaleLauncher(path.resolve(entry, "..", ".."));
   const child = spawn(process.execPath, [entry, "setup", "harness"], {
     stdio: "inherit",
     shell: false,
