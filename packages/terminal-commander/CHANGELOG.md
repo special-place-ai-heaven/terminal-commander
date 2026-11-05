@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.17](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.16...v0.3.17) (2026-11-05)
+
+
+### Bug Fixes
+
+* **npm:** warn when update ran from a stale launcher copy ([#280](https://github.com/special-place-ai-heaven/terminal-commander/issues/280)) ([6276b1a](https://github.com/special-place-ai-heaven/terminal-commander/commit/6276b1ae6cca3ce6d51ab4f9f9d4f6e30866c280))
+
 ## [0.3.16](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.15...v0.3.16) (2026-11-04)
 
 
