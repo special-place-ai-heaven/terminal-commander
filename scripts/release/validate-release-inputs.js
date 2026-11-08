@@ -9,11 +9,9 @@ const { findUnreleasedMarkers } = require("./stamp-readme-release-status.js");
 
 const PACKAGE_DIRS = [
   "packages/terminal-commander",
-  "packages/terminal-commander-linux-x64",
-  "packages/terminal-commander-linux-arm64",
-  "packages/terminal-commander-windows-x64",
-  "packages/terminal-commander-mac-x64",
-  "packages/terminal-commander-mac-arm64",
+  ...PLATFORM_PACKAGES.map((name) =>
+    `packages/${name.replace("@terminal-commander/", "terminal-commander-")}`,
+  ),
 ];
 
 function readJson(repoRoot, relativePath) {
@@ -57,6 +55,11 @@ function validateReleaseInputs(repoRoot, expectedVersion, { requireReadmeStamped
   }
 
   const rootPackage = readJson(repoRoot, "packages/terminal-commander/package.json");
+  const optionalNames = Object.keys(rootPackage.optionalDependencies || {});
+  const unexpected = optionalNames.filter((name) => !PLATFORM_PACKAGES.includes(name));
+  if (unexpected.length > 0) {
+    throw new Error(`unexpected optionalDependencies: ${unexpected.join(", ")}`);
+  }
   for (const packageName of PLATFORM_PACKAGES) {
     const actual = rootPackage.optionalDependencies && rootPackage.optionalDependencies[packageName];
     if (actual !== expectedVersion) {
