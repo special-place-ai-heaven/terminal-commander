@@ -47,9 +47,7 @@ jobs:
             terminal-commander \
             @terminal-commander/linux-x64 \
             @terminal-commander/linux-arm64 \
-            @terminal-commander/windows-x64 \
-            @terminal-commander/mac-x64 \
-            @terminal-commander/mac-arm64; do
+            @terminal-commander/windows-x64; do
             echo "── npm deprecate ${pkg}@${{ inputs.version }}"
             if ! npm deprecate "${pkg}@${{ inputs.version }}" "${{ inputs.reason }}"; then
               # 404 (version doesn't exist) is acceptable — it means publish
