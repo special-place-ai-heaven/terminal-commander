@@ -20,7 +20,7 @@ on:
       platform:
         required: true
         type: string
-        description: "linux-x64 | linux-arm64 | windows-x64 | mac-x64 | mac-arm64"
+        description: "linux-x64 | linux-arm64 | windows-x64"
       upload_artifact:
         required: false
         type: boolean
@@ -49,9 +49,8 @@ jobs:
   build:
     name: build-${{ inputs.platform }}
     # Runner policy: linux-x64 runs on the owner's self-hosted `fresh`
-    # Linux runners (current Ubuntu). GitHub-hosted runners cover Windows,
-    # macOS (Apple's SDK is not legally redistributable, so macOS stays on
-    # native GitHub runners) and linux-arm64 (an X64 host cannot run the
+    # Linux runners (current Ubuntu). GitHub-hosted runners cover Windows
+    # and linux-arm64 (an X64 host cannot run the
     # arm64 --version smoke below).
     #
     # LINUX GLIBC FLOOR: the shipped linux binaries must run on Ubuntu 22.04
@@ -63,16 +62,13 @@ jobs:
     # versions whatever the build host is, so no old Ubuntu runner is needed.
     # The post-staging objdump guard below enforces the <=2.35 floor.
     #
-    # Runner labels (verified 2026-05-25):
-    #   - macos-13 was retired 2025-12-04. Use macos-15-intel for Intel.
-    #   - macos-14 was retired 2026-11-02. Use macos-15 for Apple Silicon.
-    # When GitHub deprecates either, see runbook §"macOS runner deprecation".
+    # No macOS builds (Rob, 2026-11-08): never add a macos-* runner here.
     # linux-x64 goes GitHub-hosted for release builds (hosted_only) and for fork PRs (routing hygiene; the boundary is the runner-group setting + fork approval).
-    runs-on: ${{ (inputs.platform == 'linux-x64' && (inputs.hosted_only || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))) && 'ubuntu-24.04' || fromJSON('{"linux-x64":["self-hosted","linux","x64","fresh"],"linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022","mac-x64":"macos-15-intel","mac-arm64":"macos-15"}')[inputs.platform] }}
+    runs-on: ${{ (inputs.platform == 'linux-x64' && (inputs.hosted_only || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))) && 'ubuntu-24.04' || fromJSON('{"linux-x64":["self-hosted","linux","x64","fresh"],"linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022"}')[inputs.platform] }}
     outputs:
       artifact_name: ${{ steps.meta.outputs.artifact_name }}
     env:
-      TARGET_TRIPLE: ${{ fromJSON('{"linux-x64":"x86_64-unknown-linux-gnu","linux-arm64":"aarch64-unknown-linux-gnu","windows-x64":"x86_64-pc-windows-msvc","mac-x64":"x86_64-apple-darwin","mac-arm64":"aarch64-apple-darwin"}')[inputs.platform] }}
+      TARGET_TRIPLE: ${{ fromJSON('{"linux-x64":"x86_64-unknown-linux-gnu","linux-arm64":"aarch64-unknown-linux-gnu","windows-x64":"x86_64-pc-windows-msvc"}')[inputs.platform] }}
       PLATFORM_PKG_DIR: packages/terminal-commander-${{ inputs.platform }}
       # The self-hosted runner environment sets RUSTC_WRAPPER=sccache but the
       # image has no sccache; empty makes cargo run rustc directly. No effect
@@ -176,19 +172,6 @@ jobs:
           rm -f "$bin_dir"/*.placeholder "$bin_dir"/.gitkeep
           ls -la "$bin_dir"
 
-      - name: Report Mach-O minimum macOS (mac only)
-        if: startsWith(inputs.platform, 'mac')
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Logs LC_BUILD_VERSION minos/sdk for each staged binary so a
-          # runner image change that raises the minimum macOS is visible.
-          # Baseline (0.3.17, macos-14 arm64): minos 11.0, sdk 14.5.
-          for bin in "${PLATFORM_PKG_DIR}"/bin/*; do
-            echo "== ${bin}"
-            vtool -show-build "${bin}" | grep -E 'platform|minos|sdk'
-          done
-
       - name: Enforce glibc floor (linux only, <= 2.35)
         if: startsWith(inputs.platform, 'linux')
         shell: bash
@@ -242,7 +225,7 @@ jobs:
           echo "artifact_name=tc-bin-${{ inputs.platform }}" >> "$GITHUB_OUTPUT"
 
       # actions/upload-artifact@v7 zips the path before upload, which DROPS
-      # the executable bit on Linux/macOS (downloads come back as 0644).
+      # the executable bit on Linux (downloads come back as 0644).
       # Tar the bin/ dir first to preserve the +x mode. Consumers then untar
       # via `tar -xf bin.tar` after download-artifact.
       - name: Tar bin/ to preserve executable bit

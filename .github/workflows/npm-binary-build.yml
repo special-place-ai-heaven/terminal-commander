@@ -3,7 +3,7 @@
 #
 # NPM05 — npm binary build matrix (post-collapse).
 #
-# Calls _build-platform-binary.yml for each tier-1 + macOS target so the
+# Calls _build-platform-binary.yml for each tier-1 target (Linux + Windows; no macOS since 2026-11-08) so the
 # PR-time CI gate uses the EXACT SAME build steps as the release-time
 # publish jobs. Eliminates drift permanently.
 #
@@ -16,12 +16,12 @@ name: npm-binary-build
 # Branch-protection footgun (do NOT re-add a `paths:` filter to
 # `pull_request` here).
 #
-# The `main-protection` ruleset marks EIGHT contexts from this workflow as
+# The `main-protection` ruleset marks SIX contexts from this workflow as
 # REQUIRED status checks:
 #   pre-build-gates (linux-x64), pre-build-gates (windows-x64),
 #   build-linux-x64 / build-linux-x64, build-linux-arm64 / build-linux-arm64,
-#   build-windows-x64 / build-windows-x64, build-mac-x64 / build-mac-x64,
-#   build-mac-arm64 / build-mac-arm64, npm-pack (after all builds).
+#   build-windows-x64 / build-windows-x64, npm-pack (after all builds).
+# (The two build-mac-* contexts were removed 2026-11-08: no macOS builds.)
 # `install-path-linux` (the packed npm install-path check) is meant to be
 # required too; it gates only once it is added to that ruleset (a repository
 # setting, not this file). Until then a red run is visible but not blocking.
@@ -29,23 +29,23 @@ name: npm-binary-build
 # GitHub's "required check + path filter" interaction: if a PR touches ONLY
 # paths that the `pull_request.paths` filter excludes (e.g. a workflow-only
 # change to release-please.yml, or a docs-only change), this workflow does NOT
-# run, so those eight required contexts NEVER report. A required check that
+# run, so those six required contexts NEVER report. A required check that
 # never reports is treated as pending forever -> mergeStateStatus=BLOCKED, and
 # the PR can only land via admin override. This already bit PR #85 (a
 # release-please.yml-only fix needed an admin merge).
 #
-# Because ALL EIGHT required contexts are produced by THIS workflow (the gates,
+# Because ALL SIX required contexts are produced by THIS workflow (the gates,
 # every build-* matrix leg, and npm-pack), a single "no-op skip" job cannot
-# fix it -- it could only satisfy one context name; the other seven would stay
+# fix it -- it could only satisfy one context name; the other five would stay
 # pending. The robust cure within `.github/workflows/` scope is to drop the
 # `pull_request.paths` filter entirely so EVERY PR to `main` runs the full
-# chain and reports all eight required contexts. No PR can be permanently
+# chain and reports all six required contexts. No PR can be permanently
 # BLOCKED.
 #
 # Trade-off (accepted, not avoidable here): a docs-only or workflow-only PR now
-# runs the full native 5-platform build matrix. That cost is inherent to the
+# runs the full native 3-platform build matrix. That cost is inherent to the
 # ruleset requiring the `build-*` legs as gates -- the only way the
-# `build-mac-arm64 / build-mac-arm64` context can report success is to actually
+# `build-windows-x64 / build-windows-x64` context can report success is to actually
 # run the reusable build. Skipping the build for trivial paths would require
 # removing those build legs from the required set in the ruleset (outside the
 # `.github/workflows/` change scope). If that cost becomes a problem, the
@@ -246,28 +246,12 @@ jobs:
       platform: windows-x64
       upload_artifact: true
 
-  build-mac-x64:
-    needs: pre-build-gates
-    uses: ./.github/workflows/_build-platform-binary.yml
-    with:
-      platform: mac-x64
-      upload_artifact: true
-
-  build-mac-arm64:
-    needs: pre-build-gates
-    uses: ./.github/workflows/_build-platform-binary.yml
-    with:
-      platform: mac-arm64
-      upload_artifact: true
-
   npm-pack:
     name: npm-pack (after all builds)
     needs:
       - build-linux-x64
       - build-linux-arm64
       - build-windows-x64
-      - build-mac-x64
-      - build-mac-arm64
     # Fork PRs fall back to GitHub-hosted (routing hygiene; the boundary is the runner-group setting + fork approval).
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","fresh"]') || 'ubuntu-24.04' }}
     steps:
@@ -275,7 +259,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
-      - name: Download all 5 platform bin artifacts
+      - name: Download all 3 platform bin artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: tc-bin-*
@@ -284,7 +268,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for plat in linux-x64 linux-arm64 windows-x64 mac-x64 mac-arm64; do
+          for plat in linux-x64 linux-arm64 windows-x64; do
             pkg_dir="packages/terminal-commander-${plat}"
             # actions/download-artifact@v8 stays at the per-artifact dir; bin.tar lives inside.
             tar_path="artifacts/tc-bin-${plat}/bin.tar"
@@ -297,12 +281,12 @@ jobs:
             tar -xf "$tar_path" -C "$pkg_dir"
             ls -la "${pkg_dir}/bin"
           done
-      - name: npm pack — all 5 platform packages + root
+      - name: npm pack — all 3 platform packages + root
         shell: bash
         run: |
           set -e
           mkdir -p tarballs
-          for plat in linux-x64 linux-arm64 windows-x64 mac-x64 mac-arm64; do
+          for plat in linux-x64 linux-arm64 windows-x64; do
             (cd "packages/terminal-commander-${plat}" && npm pack --pack-destination "$GITHUB_WORKSPACE/tarballs")
           done
           (cd packages/terminal-commander && npm pack --pack-destination "$GITHUB_WORKSPACE/tarballs")
