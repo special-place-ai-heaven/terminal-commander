@@ -83,7 +83,8 @@ env:
 jobs:
   pre-build-gates:
     name: pre-build-gates (linux-x64)
-    runs-on: [self-hosted, linux, x64, fresh]
+    # Fork PRs fall back to GitHub-hosted (routing hygiene; the boundary is the runner-group setting + fork approval).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","fresh"]') || 'ubuntu-24.04' }}
     permissions:
       contents: read
     env:
@@ -267,7 +268,8 @@ jobs:
       - build-windows-x64
       - build-mac-x64
       - build-mac-arm64
-    runs-on: [self-hosted, linux, x64, fresh]
+    # Fork PRs fall back to GitHub-hosted (routing hygiene; the boundary is the runner-group setting + fork approval).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","fresh"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
