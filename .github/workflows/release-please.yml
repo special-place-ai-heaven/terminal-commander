@@ -448,6 +448,7 @@ jobs:
     with:
       platform: linux-x64
       upload_artifact: true
+      hosted_only: true
 
   presmoke-linux-x64:
     name: presmoke-linux-x64

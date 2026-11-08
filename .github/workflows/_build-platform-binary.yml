@@ -25,6 +25,11 @@ on:
         required: false
         type: boolean
         default: false
+      hosted_only:
+        required: false
+        type: boolean
+        default: false
+        description: "Build linux-x64 on GitHub-hosted (release builds; MARGARET 2026-11-08: no isolated release pool)"
       rust_toolchain:
         required: false
         type: string
@@ -62,8 +67,8 @@ jobs:
     #   - macos-13 was retired 2025-12-04. Use macos-15-intel for Intel.
     #   - macos-14 still active for Apple Silicon (M1+).
     # When GitHub deprecates either, see runbook §"macOS runner deprecation".
-    # Fork PRs build linux-x64 on GitHub-hosted (routing hygiene; the boundary is the runner-group setting + fork approval).
-    runs-on: ${{ (inputs.platform == 'linux-x64' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-24.04' || fromJSON('{"linux-x64":["self-hosted","linux","x64","fresh"],"linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022","mac-x64":"macos-15-intel","mac-arm64":"macos-14"}')[inputs.platform] }}
+    # linux-x64 goes GitHub-hosted for release builds (hosted_only) and for fork PRs (routing hygiene; the boundary is the runner-group setting + fork approval).
+    runs-on: ${{ (inputs.platform == 'linux-x64' && (inputs.hosted_only || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))) && 'ubuntu-24.04' || fromJSON('{"linux-x64":["self-hosted","linux","x64","fresh"],"linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022","mac-x64":"macos-15-intel","mac-arm64":"macos-14"}')[inputs.platform] }}
     outputs:
       artifact_name: ${{ steps.meta.outputs.artifact_name }}
     env:
