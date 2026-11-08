@@ -1680,7 +1680,7 @@ jobs:
     name: verify-mac-arm64
     needs: [release-context, publish-root]
     if: always() && needs.publish-root.result == 'success'
-    runs-on: macos-14   # Apple Silicon
+    runs-on: macos-15   # Apple Silicon (macos-14 retired 2026-11-02)
     timeout-minutes: 30 # registry wait can take 2 x 10 min; a hung step must not hold the release queue
     permissions: { contents: read, issues: write }
     steps:

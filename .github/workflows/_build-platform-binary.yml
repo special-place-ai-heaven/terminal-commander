@@ -65,10 +65,10 @@ jobs:
     #
     # Runner labels (verified 2026-05-25):
     #   - macos-13 was retired 2025-12-04. Use macos-15-intel for Intel.
-    #   - macos-14 still active for Apple Silicon (M1+).
+    #   - macos-14 was retired 2026-11-02. Use macos-15 for Apple Silicon.
     # When GitHub deprecates either, see runbook §"macOS runner deprecation".
     # linux-x64 goes GitHub-hosted for release builds (hosted_only) and for fork PRs (routing hygiene; the boundary is the runner-group setting + fork approval).
-    runs-on: ${{ (inputs.platform == 'linux-x64' && (inputs.hosted_only || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))) && 'ubuntu-24.04' || fromJSON('{"linux-x64":["self-hosted","linux","x64","fresh"],"linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022","mac-x64":"macos-15-intel","mac-arm64":"macos-14"}')[inputs.platform] }}
+    runs-on: ${{ (inputs.platform == 'linux-x64' && (inputs.hosted_only || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))) && 'ubuntu-24.04' || fromJSON('{"linux-x64":["self-hosted","linux","x64","fresh"],"linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022","mac-x64":"macos-15-intel","mac-arm64":"macos-15"}')[inputs.platform] }}
     outputs:
       artifact_name: ${{ steps.meta.outputs.artifact_name }}
     env:
@@ -175,6 +175,19 @@ jobs:
           # Strip the .placeholder + .gitkeep markers committed for empty-dir guarantee.
           rm -f "$bin_dir"/*.placeholder "$bin_dir"/.gitkeep
           ls -la "$bin_dir"
+
+      - name: Report Mach-O minimum macOS (mac only)
+        if: startsWith(inputs.platform, 'mac')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Logs LC_BUILD_VERSION minos/sdk for each staged binary so a
+          # runner image change that raises the minimum macOS is visible.
+          # Baseline (0.3.17, macos-14 arm64): minos 11.0, sdk 14.5.
+          for bin in "${PLATFORM_PKG_DIR}"/bin/*; do
+            echo "== ${bin}"
+            vtool -show-build "${bin}" | grep -E 'platform|minos|sdk'
+          done
 
       - name: Enforce glibc floor (linux only, <= 2.35)
         if: startsWith(inputs.platform, 'linux')
