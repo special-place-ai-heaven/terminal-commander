@@ -44,7 +44,11 @@ use std::borrow::Cow;
 
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::{
+        router::tool::ToolRouter,
+        tool::{InputResponses as ToolInputResponses, RequestState},
+        wrapper::Parameters,
+    },
     model::{
         CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
         Implementation, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
@@ -2881,21 +2885,38 @@ impl TerminalCommanderMcpServer {
     async fn credential_request(
         &self,
         Parameters(params): Parameters<McpCredentialRequestParams>,
+        RequestState(request_state): RequestState,
+        ToolInputResponses(input_responses): ToolInputResponses,
         ctx: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         self.ensure_daemon_available().await?;
         use terminal_commander_core::ids::JobIdKind;
         let job_id = parse_id::<JobIdKind>("job_id", &params.job_id).map_err(invalid_params)?;
         let caps = ctx.client_capabilities();
-        let on_page = if url_elicitation_supported(caps.as_ref()) {
-            self.elicit_owner_page(&ctx, job_id, elicitation_client(caps.as_ref()))
-                .await
-        } else {
-            eprintln!(
-                "{}",
-                elicitation_log_line(job_id, elicitation_client(caps.as_ref()), "not-offered")
-            );
+        let client = elicitation_client(caps.as_ref());
+        let on_page = if !url_elicitation_supported(caps.as_ref()) {
+            eprintln!("{}", elicitation_log_line(job_id, client, "not-offered"));
             false
+        } else if ctx.protocol_version().is_some_and(|v| !v.has_initialize()) {
+            // Protocol 2026-07-28+ forbids a server-to-client request inside
+            // a call (rmcp >= 3.6 rejects it), so the elicitation is returned
+            // as an `InputRequiredResult` and the client retries the call
+            // with its answer (SEP-2322 multi round-trip requests).
+            match self
+                .owner_page_round(
+                    ctx.peer.clone(),
+                    job_id,
+                    client,
+                    input_responses,
+                    request_state,
+                )
+                .await
+            {
+                OwnerPageStep::Ask(input_required) => return Ok(input_required.into()),
+                OwnerPageStep::Settled(on_page) => on_page,
+            }
+        } else {
+            self.elicit_owner_page(&ctx, job_id, client).await
         };
         // With the owner's page open, answer `pending` within seconds and
         // let the model poll; otherwise the daemon asks through its native
@@ -2903,7 +2924,7 @@ impl TerminalCommanderMcpServer {
         let resp = self
             .credential_status(job_id, on_page.then_some(PAGE_POLL_MS))
             .await?;
-        json_tool_result(&resp)
+        json_tool_result(&resp).map(Into::into)
     }
 
     async fn credential_status(
@@ -2935,40 +2956,17 @@ impl TerminalCommanderMcpServer {
         job_id: terminal_commander_core::JobId,
         client: &'static str,
     ) -> bool {
-        use rmcp::model::{ElicitRequest, ElicitRequestParams, ServerRequest};
-        let Ok(IpcResponse::CredentialUrl(opened)) = self
-            .daemon
-            .call(IpcRequest::CredentialUrl(CredentialUrlParams {
-                job_id,
-                op: CredentialUrlOp::Open,
-            }))
-            .await
-        else {
+        use rmcp::model::{ElicitRequest, ServerRequest};
+        let Some(page) = self.open_owner_page(job_id).await else {
             return false;
         };
-        let (Some(url), Some(elicitation_id)) = (opened.url, opened.elicitation_id) else {
-            return false;
-        };
-        if !opened.fresh {
+        if !page.fresh {
             // Already shown for this prompt: poll it, never re-ask.
             return true;
         }
-        let kind = match opened.kind {
-            Some(CredentialKind::Sudo) => "sudo",
-            Some(CredentialKind::Ssh) => "ssh",
-            Some(CredentialKind::Password) | None => "a password prompt",
-        };
-        let request = ServerRequest::ElicitRequest(ElicitRequest::new(
-            ElicitRequestParams::UrlElicitationParams {
-                meta: None,
-                message: format!(
-                    "TC needs the owner's password for {kind} in job {}",
-                    job_id.to_wire_string()
-                ),
-                url,
-                elicitation_id: elicitation_id.clone(),
-            },
-        ));
+        let elicitation_id = page.elicitation_id.clone();
+        let params = owner_page_params(job_id, page);
+        let request = ServerRequest::ElicitRequest(ElicitRequest::new(params));
         // Sent inside this tool call (SEP-2260), and answered inside it: a
         // sent request is no proof the owner sees anything, so only the
         // client's accept makes the page the channel. Unanswered after
@@ -2997,6 +2995,40 @@ impl TerminalCommanderMcpServer {
             return accepted.await.unwrap_or(false);
         }
         eprintln!("{}", elicitation_log_line(job_id, client, "error"));
+        self.abandon_owner_page(job_id).await;
+        false
+    }
+
+    /// Opens (or re-finds) the owner's one-shot page for `job_id`'s prompt.
+    /// `None` sends `credential_request` down the daemon's own chain.
+    async fn open_owner_page(&self, job_id: terminal_commander_core::JobId) -> Option<OwnerPage> {
+        let Ok(IpcResponse::CredentialUrl(opened)) = self
+            .daemon
+            .call(IpcRequest::CredentialUrl(CredentialUrlParams {
+                job_id,
+                op: CredentialUrlOp::Open,
+            }))
+            .await
+        else {
+            return None;
+        };
+        let (Some(url), Some(elicitation_id)) = (opened.url, opened.elicitation_id) else {
+            return None;
+        };
+        Some(OwnerPage {
+            url,
+            elicitation_id,
+            kind: match opened.kind {
+                Some(CredentialKind::Sudo) => "sudo",
+                Some(CredentialKind::Ssh) => "ssh",
+                Some(CredentialKind::Password) | None => "a password prompt",
+            },
+            fresh: opened.fresh,
+        })
+    }
+
+    /// Closes the page: the owner's refusal, or no usable answer.
+    async fn abandon_owner_page(&self, job_id: terminal_commander_core::JobId) {
         let _ = self
             .daemon
             .call(IpcRequest::CredentialUrl(CredentialUrlParams {
@@ -3004,7 +3036,67 @@ impl TerminalCommanderMcpServer {
                 op: CredentialUrlOp::Abandon,
             }))
             .await;
-        false
+    }
+
+    /// One round of the owner-page elicitation for a 2026-07-28+ client,
+    /// which cannot be sent a request mid-call (SEP-2322). Round 1 opens the
+    /// page and returns it as an input request, with the elicitation id as
+    /// the opaque request state. Round 2 carries the client's answer: accept
+    /// keeps the page (and arms its open deadline), anything else closes it
+    /// so the same call falls back to the daemon's native prompt or the CLI.
+    /// A client that never retries leaves the page to the daemon's own TTL.
+    /// Never errors: every failure falls back.
+    async fn owner_page_round(
+        &self,
+        peer: rmcp::service::Peer<RoleServer>,
+        job_id: terminal_commander_core::JobId,
+        client: &'static str,
+        responses: Option<rmcp::model::InputResponses>,
+        request_state: Option<String>,
+    ) -> OwnerPageStep {
+        if let Some(responses) = responses {
+            let action = responses
+                .get(OWNER_PAGE_INPUT)
+                .and_then(|v| v.get("action"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("error");
+            let elicitation_id = request_state.filter(|s| !s.is_empty());
+            if let (true, Some(elicitation_id)) = (action == "accept", elicitation_id) {
+                eprintln!("{}", elicitation_log_line(job_id, client, "accepted"));
+                // Arms the page's open deadline: unopened, it falls back by itself.
+                let _ = self
+                    .daemon
+                    .call(IpcRequest::CredentialUrl(CredentialUrlParams {
+                        job_id,
+                        op: CredentialUrlOp::Accepted,
+                    }))
+                    .await;
+                tokio::spawn(settle_page(self.daemon.clone(), peer, job_id, elicitation_id));
+                return OwnerPageStep::Settled(true);
+            }
+            let outcome = match action {
+                "decline" => "declined",
+                "cancel" => "cancelled",
+                _ => "error",
+            };
+            eprintln!("{}", elicitation_log_line(job_id, client, outcome));
+            self.abandon_owner_page(job_id).await;
+            return OwnerPageStep::Settled(false);
+        }
+        let Some(page) = self.open_owner_page(job_id).await else {
+            return OwnerPageStep::Settled(false);
+        };
+        if !page.fresh {
+            // Already shown for this prompt: poll it, never re-ask.
+            return OwnerPageStep::Settled(true);
+        }
+        let state = page.elicitation_id.clone();
+        let params = owner_page_params(job_id, page);
+        let input = rmcp::model::InputRequest::Elicitation(rmcp::model::ElicitRequest::new(params));
+        let mut requests = rmcp::model::InputRequests::new();
+        requests.insert(OWNER_PAGE_INPUT.to_owned(), input);
+        let result = rmcp::model::InputRequiredResult::new(Some(requests), Some(state));
+        OwnerPageStep::Ask(result)
     }
 
     /// `shell_session_start` — start a persistent shell session.
@@ -6777,6 +6869,82 @@ const PAGE_POLL_MS: u64 = 10_000;
 /// is asked another way. The owner only has to agree to open the link.
 const ELICIT_ACK_MS: u64 = 30_000;
 
+/// Key of the owner-page input request in a 2026-07-28+ multi round-trip
+/// `credential_request` (the client answers under the same key).
+const OWNER_PAGE_INPUT: &str = "owner_page";
+
+/// The owner's one-shot page, as the daemon opened it.
+struct OwnerPage {
+    url: String,
+    elicitation_id: String,
+    kind: &'static str,
+    /// True only for the call that opened it: one elicitation per prompt.
+    fresh: bool,
+}
+
+/// What one multi round-trip `credential_request` call does next.
+enum OwnerPageStep {
+    /// Return the elicitation to the client; it retries with its answer.
+    Ask(rmcp::model::InputRequiredResult),
+    /// Whether the owner has the page (poll it), or the call falls back to
+    /// the daemon's native prompt or the CLI.
+    Settled(bool),
+}
+
+/// The URL-mode elicitation asking the owner to open `page`. The text never
+/// carries the link; the link travels only in `url`, to the client.
+fn owner_page_params(
+    job_id: terminal_commander_core::JobId,
+    page: OwnerPage,
+) -> rmcp::model::ElicitRequestParams {
+    rmcp::model::ElicitRequestParams::UrlElicitationParams {
+        meta: None,
+        message: format!(
+            "TC needs the owner's password for {} in job {}",
+            page.kind,
+            job_id.to_wire_string()
+        ),
+        url: page.url,
+        elicitation_id: page.elicitation_id,
+    }
+}
+
+/// Once the accepted page settles (answered, declined, expired, or handed to
+/// the native prompt), `notifications/elicitation/complete` closes the
+/// client's waiting state. Each daemon call waits up to 60 s on the outcome.
+async fn settle_page(
+    daemon: crate::daemon_client::McpDaemonClient,
+    peer: rmcp::service::Peer<RoleServer>,
+    job_id: terminal_commander_core::JobId,
+    elicitation_id: String,
+) {
+    loop {
+        let status = match daemon
+            .call(IpcRequest::CredentialRequest(CredentialRequestParams {
+                job_id,
+                wait_ms: None,
+            }))
+            .await
+        {
+            Ok(IpcResponse::CredentialRequest(r)) => r.status,
+            _ => return,
+        };
+        if status != CredentialStatus::Pending {
+            let _ = peer
+                .send_notification(rmcp::model::ServerNotification::CustomNotification(
+                    rmcp::model::CustomNotification::new(
+                        "notifications/elicitation/complete",
+                        Some(serde_json::json!({ "elicitationId": elicitation_id })),
+                    ),
+                ))
+                .await;
+            return;
+        }
+    }
+}
+
+
+
 /// The owner's elicitation dialog. Only accept keeps the page: decline,
 /// cancel, an error, or no answer within [`ELICIT_ACK_MS`] closes it, so the
 /// same `credential_request` falls back to the daemon's native prompt or
@@ -6820,33 +6988,7 @@ async fn follow_elicitation(
     if op != CredentialUrlOp::Accepted {
         return;
     }
-    // Each call waits up to 60 s on the outcome; the page settles within its
-    // TTL (answered, declined, expired, or handed to the native prompt).
-    loop {
-        let status = match daemon
-            .call(IpcRequest::CredentialRequest(CredentialRequestParams {
-                job_id,
-                wait_ms: None,
-            }))
-            .await
-        {
-            Ok(IpcResponse::CredentialRequest(r)) => r.status,
-            _ => return,
-        };
-        if status != CredentialStatus::Pending {
-            // The link's interaction is over either way: close the client's
-            // waiting state.
-            let _ = peer
-                .send_notification(rmcp::model::ServerNotification::CustomNotification(
-                    rmcp::model::CustomNotification::new(
-                        "notifications/elicitation/complete",
-                        Some(serde_json::json!({ "elicitationId": elicitation_id })),
-                    ),
-                ))
-                .await;
-            return;
-        }
-    }
+    settle_page(daemon, peer, job_id, elicitation_id).await;
 }
 
 /// Which elicitation modes the client declared, for the log line.
