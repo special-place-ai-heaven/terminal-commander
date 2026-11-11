@@ -11,10 +11,6 @@ const EXPECTED_RELEASE_JOBS = Object.freeze([
   "publish-linux-arm64",
   "build-windows-x64",
   "publish-windows-x64",
-  "build-mac-x64",
-  "publish-mac-x64",
-  "build-mac-arm64",
-  "publish-mac-arm64",
   "publish-root",
   "publish-cargo-terminal-commander-core",
   "publish-cargo-terminal-commander-sifters",
@@ -27,8 +23,6 @@ const EXPECTED_RELEASE_JOBS = Object.freeze([
   "verify-linux-x64",
   "verify-linux-arm64",
   "verify-windows-x64",
-  "verify-mac-x64",
-  "verify-mac-arm64",
 ]);
 
 function verifyReleaseResults(needs) {

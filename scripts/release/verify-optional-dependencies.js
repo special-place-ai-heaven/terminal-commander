@@ -6,6 +6,11 @@ const { PLATFORM_PACKAGES } = require("./platform-packages.js");
 
 const version = pkg.version;
 const deps = pkg.optionalDependencies || {};
+const extras = Object.keys(deps).filter((name) => !PLATFORM_PACKAGES.includes(name));
+if (extras.length > 0) {
+  console.error(`unexpected optionalDependencies: ${extras.join(", ")}`);
+  process.exit(1);
+}
 
 for (const name of PLATFORM_PACKAGES) {
   if (deps[name] !== version) {
