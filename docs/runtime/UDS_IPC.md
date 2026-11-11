@@ -248,8 +248,10 @@ Notify` until a wake-up, the job ends, or the timeout fires.
   `severity_min` / `kind_filter` reject it; the empty read is returned.
 - `match`: appends the filters reject do not end the wait. It returns only
   when an event passes the filters, the watched job ends, or the timeout fires.
-- In both modes, when the bucket's job has ended the call returns at once with
-  `wake_reason = exit` and `job_exit`, whether or not a rule matched.
+- In both modes, when the bucket's job has ended and no event is left to
+  return, the call returns at once with `wake_reason = exit` and `job_exit`,
+  whether or not a rule ever matched; events still pending are returned first
+  (`wake_reason` append/match), and the next call returns the exit.
 
 The ceiling is `[limits] bucket_wait_max_ms`; omitted, it is 3 600 000 ms
 under `full_access` / `admin_debug` and 30 000 ms on every other profile
