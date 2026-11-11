@@ -84,7 +84,8 @@ jobs:
   pre-build-gates:
     name: pre-build-gates (linux-x64)
     # Fork PRs fall back to GitHub-hosted (routing hygiene; the boundary is the runner-group setting + fork approval).
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","fresh"]') || 'ubuntu-24.04' }}
+    # Otherwise the repository variable TP_RUNS_ON chooses the runner; unset means the self-hosted pool.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.TP_RUNS_ON || '["self-hosted","linux","x64","fresh"]') || 'ubuntu-24.04' }}
     permissions:
       contents: read
     env:
@@ -253,7 +254,8 @@ jobs:
       - build-linux-arm64
       - build-windows-x64
     # Fork PRs fall back to GitHub-hosted (routing hygiene; the boundary is the runner-group setting + fork approval).
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","fresh"]') || 'ubuntu-24.04' }}
+    # Otherwise the repository variable TP_RUNS_ON chooses the runner; unset means the self-hosted pool.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.TP_RUNS_ON || '["self-hosted","linux","x64","fresh"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

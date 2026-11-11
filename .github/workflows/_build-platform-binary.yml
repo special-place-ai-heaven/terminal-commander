@@ -64,7 +64,8 @@ jobs:
     #
     # No macOS builds (Rob, 2026-11-08): never add a macos-* runner here.
     # linux-x64 goes GitHub-hosted for release builds (hosted_only) and for fork PRs (routing hygiene; the boundary is the runner-group setting + fork approval).
-    runs-on: ${{ (inputs.platform == 'linux-x64' && (inputs.hosted_only || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))) && 'ubuntu-24.04' || fromJSON('{"linux-x64":["self-hosted","linux","x64","fresh"],"linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022"}')[inputs.platform] }}
+    # Otherwise the repository variable TP_RUNS_ON chooses the linux-x64 runner; unset means the self-hosted pool.
+    runs-on: ${{ (inputs.platform == 'linux-x64' && (inputs.hosted_only || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))) && 'ubuntu-24.04' || (inputs.platform == 'linux-x64' && fromJSON(vars.TP_RUNS_ON || '["self-hosted","linux","x64","fresh"]')) || fromJSON('{"linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022"}')[inputs.platform] }}
     outputs:
       artifact_name: ${{ steps.meta.outputs.artifact_name }}
     env:

@@ -102,6 +102,9 @@ impl LiveDaemon {
         daemon
     }
 
+    /// A non-empty `stdin` must be written in full (no error tolerated). An
+    /// empty one writes nothing: the refusal paths exit before reading, so a
+    /// write there would race the CLI's exit and could fail with EPIPE.
     fn cli(&self, args: &[&str], stdin: &str) -> std::process::Output {
         let mut child = isolated_env::isolate(
             &mut Command::new(env!("CARGO_BIN_EXE_terminal-commander")),
@@ -116,12 +119,11 @@ impl LiveDaemon {
         .stderr(Stdio::piped())
         .spawn()
         .expect("run cli");
-        child
-            .stdin
-            .take()
-            .expect("stdin")
-            .write_all(stdin.as_bytes())
-            .expect("write stdin");
+        let mut pipe = child.stdin.take().expect("stdin");
+        if !stdin.is_empty() {
+            pipe.write_all(stdin.as_bytes()).expect("write stdin");
+        }
+        drop(pipe);
         child.wait_with_output().expect("cli output")
     }
 }
@@ -158,6 +160,20 @@ async fn wait_awaiting(client: &DaemonClient, job_id: JobId) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("job never reported awaiting_credential");
+}
+
+/// A refusal exits non-zero without ever prompting (`Password: ` is printed
+/// only right before the stdin read) and without answering the job.
+fn assert_refused_before_read(out: &std::process::Output) {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "stdout={stdout} stderr={stderr}"
+    );
+    assert!(!stderr.contains("Password:"), "read stdin: {stderr}");
+    assert!(!stdout.contains("provided"), "{stdout}");
 }
 
 #[test]
@@ -200,7 +216,7 @@ fn credential_provide_reads_stdin_and_the_job_receives_it() {
 
     // Not waiting yet is refused before any password is read.
     let early = daemon.cli(&["credential", "provide", "job_not-a-job"], "");
-    assert_ne!(early.status.code(), Some(0));
+    assert_refused_before_read(&early);
 
     rt.block_on(wait_awaiting(&client, job_id));
     let out = daemon.cli(&["credential", "provide", &job], &format!("{SECRET}\n"));
@@ -233,9 +249,15 @@ fn credential_provide_reads_stdin_and_the_job_receives_it() {
         "the PTY child did not receive the secret"
     );
 
-    // A second provide has no prompt to answer.
-    let again = daemon.cli(&["credential", "provide", &job], &format!("{SECRET}\n"));
-    assert_ne!(again.status.code(), Some(0));
+    // A second provide has no prompt to answer: refused before any read.
+    let again = daemon.cli(&["credential", "provide", &job], "");
+    assert_refused_before_read(&again);
+    let again_stderr = String::from_utf8_lossy(&again.stderr);
+    let reasons = ["is not live", "not waiting for a password"];
+    assert!(
+        reasons.iter().any(|r| again_stderr.contains(r)),
+        "{again_stderr}"
+    );
     let _ = rt.block_on(call(
         &client,
         IpcRequest::PtyCommandStop(PtyCommandStopParams { job_id }),

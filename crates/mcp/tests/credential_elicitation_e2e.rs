@@ -5,7 +5,9 @@
 //! client plays the MCP client AND the owner's browser: it receives the
 //! `elicitation/create` (URL mode), accepts, then GETs and POSTs the
 //! one-shot loopback page. A client without the capability gets the
-//! daemon's own chain instead (here the admin-CLI fallback).
+//! daemon's own chain instead (here the admin-CLI fallback). Both the
+//! `initialize` handshake (request sent mid-call) and the 2026-07-28
+//! discover handshake (`InputRequiredResult`, client retries) are covered.
 
 #![cfg(unix)]
 
@@ -178,9 +180,24 @@ fn spawn_daemon_with(
         .expect("ipc server spawn")
 }
 
+/// `initialize` handshake: the server may send requests mid-call.
 async fn connect(
     handle: &ServerHandle,
     client: OwnerClient,
+) -> (
+    rmcp::service::RunningService<rmcp::RoleServer, TerminalCommanderMcpServer>,
+    rmcp::service::RunningService<RoleClient, OwnerClient>,
+) {
+    connect_with(handle, client, false).await
+}
+
+/// `discover` selects the 2026-07-28 handshake, where the server must not
+/// send requests mid-call: `credential_request` asks through an
+/// `InputRequiredResult` and the client's retry carries the answer.
+async fn connect_with(
+    handle: &ServerHandle,
+    client: OwnerClient,
+    discover: bool,
 ) -> (
     rmcp::service::RunningService<rmcp::RoleServer, TerminalCommanderMcpServer>,
     rmcp::service::RunningService<RoleClient, OwnerClient>,
@@ -191,6 +208,11 @@ async fn connect(
     let server = TerminalCommanderMcpServer::new(daemon);
     let server_task =
         tokio::spawn(async move { server.serve(server_transport).await.expect("server serve") });
+    if !discover {
+        // Initialize is answered at once, so joining the server task cannot hang.
+        let client = client.serve(client_transport).await.expect("client serve");
+        return (server_task.await.expect("server join"), client);
+    }
     let client = client
         .serve_with_lifecycle(
             client_transport,
@@ -200,6 +222,9 @@ async fn connect(
         )
         .await
         .expect("client serve");
+    // The server answers discover, then waits for the first non-discover
+    // request; send one before joining the server task.
+    client.list_all_tools().await.expect("first real request");
     (server_task.await.expect("server join"), client)
 }
 
@@ -278,6 +303,16 @@ async fn exit_code(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn url_elicitation_client_gets_the_owner_page_and_the_model_only_a_status() {
+    owner_page_flow(false).await;
+}
+
+/// Same flow on the discover handshake (MRTR instead of a mid-call request).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discover_client_gets_the_owner_page_through_an_input_required_result() {
+    owner_page_flow(true).await;
+}
+
+async fn owner_page_flow(discover: bool) {
     let Some(python) = python3() else {
         eprintln!("skipping: python3 not found");
         return;
@@ -289,7 +324,7 @@ async fn url_elicitation_client_gets_the_owner_page_and_the_model_only_a_status(
             url_mode: true,
             ..OwnerClient::default()
         };
-        let (_server, client) = connect(&handle, owner.clone()).await;
+        let (_server, client) = connect_with(&handle, owner.clone(), discover).await;
         let job_id = start_prompting_child(&client, python).await;
 
         let result = call(
@@ -472,7 +507,7 @@ async fn page_is_closed(url: &str) -> bool {
 /// answer while the model polls `pending`: the same call falls back to the
 /// daemon's chain (here no native prompt, so the CLI command), the
 /// abandoned page is closed, and later polls never re-elicit.
-async fn untaken_elicitation_falls_back(tag: &str, reply: Reply) {
+async fn untaken_elicitation_falls_back(tag: &str, reply: Reply, discover: bool) {
     let Some(python) = python3() else {
         eprintln!("skipping: python3 not found");
         return;
@@ -485,7 +520,7 @@ async fn untaken_elicitation_falls_back(tag: &str, reply: Reply) {
             reply,
             ..OwnerClient::default()
         };
-        let (_server, client) = connect(&handle, owner.clone()).await;
+        let (_server, client) = connect_with(&handle, owner.clone(), discover).await;
         let job_id = start_prompting_child(&client, python).await;
 
         let first = call(
@@ -540,17 +575,89 @@ async fn untaken_elicitation_falls_back(tag: &str, reply: Reply) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_that_never_answers_the_elicitation_falls_back_in_the_same_call() {
-    untaken_elicitation_falls_back("silent", Reply::Silent).await;
+    untaken_elicitation_falls_back("silent", Reply::Silent, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_declined_elicitation_falls_back_in_the_same_call() {
-    untaken_elicitation_falls_back("decline", Reply::Decline).await;
+    untaken_elicitation_falls_back("decline", Reply::Decline, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_error_on_the_elicitation_falls_back_in_the_same_call() {
-    untaken_elicitation_falls_back("error", Reply::Error).await;
+    untaken_elicitation_falls_back("error", Reply::Error, false).await;
+}
+
+/// Discover handshake: a declined input request falls back in the retried call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_discover_client_declining_the_elicitation_falls_back_in_the_same_call() {
+    untaken_elicitation_falls_back("decline-discover", Reply::Decline, true).await;
+}
+
+/// Discover handshake: a late retry that carries a stale elicitation id must
+/// not accept the page the daemon holds now. It closes that page and falls
+/// back as on decline, instead of answering `pending` on a page it never
+/// asked the owner to open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_elicitation_id_on_a_discover_retry_does_not_accept_the_newer_page() {
+    let Some(python) = python3() else {
+        eprintln!("skipping: python3 not found");
+        return;
+    };
+    let data = tmp_data_dir("stale-discover");
+    let handle = spawn_daemon(&data);
+    {
+        let owner = OwnerClient {
+            url_mode: true,
+            reply: Reply::AcceptNeverOpen,
+            ..OwnerClient::default()
+        };
+        let (_server, client) = connect_with(&handle, owner.clone(), true).await;
+        let job_id = start_prompting_child(&client, python).await;
+
+        // The client's own round trip accepts the current page.
+        let _ = call(
+            &client,
+            "credential_request",
+            serde_json::json!({"job_id": job_id}),
+        )
+        .await;
+        assert_eq!(owner.elicitations.load(Ordering::SeqCst), 1);
+        let url = owner.urls.lock().unwrap()[0].clone();
+
+        // A late retry of an earlier prompt: accept, but a stale id.
+        let mut answers = rmcp::model::InputResponses::new();
+        answers.insert(
+            "owner_page".to_owned(),
+            serde_json::json!({"action": "accept"}),
+        );
+        let mut params = CallToolRequestParams::new("credential_request")
+            .with_input_responses(answers)
+            .with_request_state("stale-elicitation-id");
+        params.arguments = serde_json::json!({"job_id": job_id}).as_object().cloned();
+        let result = client.call_tool(params).await.expect("stale retry");
+        let text = result
+            .content
+            .iter()
+            .find_map(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("text content");
+        assert!(text.contains("owner_action_required"), "{text}");
+        assert!(
+            page_is_closed(&url).await,
+            "the stale retry must close the page"
+        );
+        assert_eq!(owner.elicitations.load(Ordering::SeqCst), 1);
+
+        let _ = call(
+            &client,
+            "pty_command_stop",
+            serde_json::json!({"job_id": job_id}),
+        )
+        .await;
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&data);
 }
 
 /// The residual gap: a client that ACCEPTS the elicitation but never shows
