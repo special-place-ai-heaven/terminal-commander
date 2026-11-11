@@ -15,13 +15,13 @@ fn bucket_wait_params_old_payload_deserializes() {
     let old = serde_json::json!({ "bucket_id": id, "cursor": 7, "timeout_ms": 600_000 });
     let p: BucketWaitParams = serde_json::from_value(old).unwrap();
     assert_eq!(p.wake_mode, None, "absent = any");
-    assert_eq!(p.requested_timeout(), Duration::from_millis(600_000));
+    assert_eq!(p.requested_timeout(), Duration::from_mins(10));
     // The request is honoured up to the ceiling, not the old 30 s constant.
     assert_eq!(
         p.effective_timeout(3_600_000),
-        Duration::from_millis(600_000)
+        Duration::from_mins(10)
     );
-    assert_eq!(p.effective_timeout(30_000), Duration::from_millis(30_000));
+    assert_eq!(p.effective_timeout(30_000), Duration::from_secs(30));
     // A new client's mode round-trips; a default request stays byte-lean.
     let new = serde_json::json!({ "bucket_id": id, "cursor": 0, "wake_mode": "match" });
     let p: BucketWaitParams = serde_json::from_value(new).unwrap();
