@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ipc::protocol::BUCKET_WAIT_HARD_CAP_MS;
 use crate::policy::{PolicyCaps, PolicyProfile};
 
 /// Hard cap on a single file_read_window response. Mirrors the value
@@ -415,6 +416,15 @@ pub struct LimitsSection {
     pub file_window_bytes: usize,
     #[serde(default = "default_read_limit")]
     pub bucket_read_limit: usize,
+    /// Longest `bucket_wait` honoured, in ms. Omitted: 3 600 000 under
+    /// `full_access` / `admin_debug`, 30 000 elsewhere. Clamped to
+    /// `BUCKET_WAIT_HARD_CAP_MS`; 0 is rejected. Independent of `[governor]`.
+    #[serde(default)]
+    pub bucket_wait_max_ms: Option<u64>,
+    /// Longest `run_and_watch` wait honoured, in ms. Omitted: 3 600 000
+    /// under `full_access` / `admin_debug`, 60 000 elsewhere. Same bounds.
+    #[serde(default)]
+    pub run_and_watch_max_wait_ms: Option<u64>,
 }
 
 const fn default_file_window_bytes() -> usize {
@@ -469,6 +479,13 @@ pub struct DaemonConfig {
     pub warnings: Vec<String>,
 }
 
+/// Optional keys that serialize to nothing while unset, so they are absent
+/// from the schema walk below yet valid when a config sets them.
+const OPTIONAL_KEYS: &[&str] = &[
+    "limits.bucket_wait_max_ms",
+    "limits.run_and_watch_max_wait_ms",
+];
+
 /// Keys the schema still accepts (configs in the field set them) that the
 /// daemon does not act on, with what is true instead.
 const NOT_ENFORCED: &[(&str, &str)] = &[
@@ -515,10 +532,63 @@ const fn default_limits() -> LimitsSection {
     LimitsSection {
         file_window_bytes: DEFAULT_FILE_WINDOW_BYTES,
         bucket_read_limit: DEFAULT_READ_LIMIT,
+        bucket_wait_max_ms: None,
+        run_and_watch_max_wait_ms: None,
     }
 }
 
 impl DaemonConfig {
+    /// Longest `bucket_wait` this daemon honours, in ms: `[limits]
+    /// bucket_wait_max_ms`, else 3 600 000 under `full_access` / `admin_debug`
+    /// and 30 000 on every other profile.
+    #[must_use]
+    pub fn bucket_wait_ceiling_ms(&self) -> u64 {
+        self.wait_ceiling_ms(self.limits.bucket_wait_max_ms, 30_000)
+    }
+
+    /// Longest `run_and_watch` wait this daemon honours, in ms: `[limits]
+    /// run_and_watch_max_wait_ms`, else 3 600 000 under `full_access` /
+    /// `admin_debug` and 60 000 on every other profile.
+    #[must_use]
+    pub fn run_and_watch_ceiling_ms(&self) -> u64 {
+        self.wait_ceiling_ms(self.limits.run_and_watch_max_wait_ms, 60_000)
+    }
+
+    fn wait_ceiling_ms(&self, configured: Option<u64>, hardened_default: u64) -> u64 {
+        let trusted = matches!(
+            self.policy.profile,
+            PolicyProfile::FullAccess | PolicyProfile::AdminDebug
+        );
+        let default = if trusted {
+            BUCKET_WAIT_HARD_CAP_MS
+        } else {
+            hardened_default
+        };
+        configured.unwrap_or(default).min(BUCKET_WAIT_HARD_CAP_MS)
+    }
+
+    /// One note per wait ceiling that is above the hard cap and will be
+    /// clamped to it.
+    fn wait_ceiling_clamp_notes(&self) -> Vec<String> {
+        [
+            ("limits.bucket_wait_max_ms", self.limits.bucket_wait_max_ms),
+            (
+                "limits.run_and_watch_max_wait_ms",
+                self.limits.run_and_watch_max_wait_ms,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| {
+            value.filter(|v| *v > BUCKET_WAIT_HARD_CAP_MS).map(|v| {
+                format!(
+                    "`{key}` = {v} is above the {BUCKET_WAIT_HARD_CAP_MS} ms hard cap; \
+                     it is clamped to {BUCKET_WAIT_HARD_CAP_MS}"
+                )
+            })
+        })
+        .collect()
+    }
+
     /// Build a config with safe defaults rooted at the given data
     /// directory. Useful for tests and for first-run when no file
     /// exists.
@@ -568,12 +638,14 @@ impl DaemonConfig {
     /// Parse a config from an in-memory string.
     pub fn from_toml(s: &str) -> Result<Self> {
         let mut cfg: Self = toml::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let clamp_notes = cfg.wait_ceiling_clamp_notes();
         cfg.validate_and_clamp()?;
         let given: toml::Table =
             toml::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?;
         cfg.warnings = cfg.ineffective_keys(&given);
         cfg.warnings
             .extend(crate::governor::section_warnings(&cfg.governor));
+        cfg.warnings.extend(clamp_notes);
         Ok(cfg)
     }
 
@@ -588,6 +660,7 @@ impl DaemonConfig {
                     format!("{at}.{key}")
                 };
                 match known.get(key) {
+                    None if OPTIONAL_KEYS.contains(&path.as_str()) => {}
                     None => out.push(format!(
                         "`{path}` is not a setting TC knows; it has no effect"
                     )),
@@ -736,6 +809,17 @@ impl DaemonConfig {
                 "limits.bucket_read_limit must be > 0".to_owned(),
             ));
         }
+        for (key, value) in [
+            ("limits.bucket_wait_max_ms", self.limits.bucket_wait_max_ms),
+            (
+                "limits.run_and_watch_max_wait_ms",
+                self.limits.run_and_watch_max_wait_ms,
+            ),
+        ] {
+            if value == Some(0) {
+                return Err(ConfigError::Validate(format!("{key} must be > 0")));
+            }
+        }
         // TC22: `repo_only` cannot boot without a confinement root. An
         // unrooted repo_only engine fail-safe denies every path/cwd
         // action, which is safe but useless; reject it at config load so
@@ -757,6 +841,15 @@ impl DaemonConfig {
         }
         if self.limits.bucket_read_limit > HARD_MAX_READ_LIMIT {
             self.limits.bucket_read_limit = HARD_MAX_READ_LIMIT;
+        }
+        for v in [
+            &mut self.limits.bucket_wait_max_ms,
+            &mut self.limits.run_and_watch_max_wait_ms,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *v = (*v).min(BUCKET_WAIT_HARD_CAP_MS);
         }
         Ok(())
     }
@@ -1018,6 +1111,66 @@ mod tests {
             ConfigError::Validate(m) => assert!(m.contains("9P")),
             other => panic!("expected Validate error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn wait_ceilings_default_by_profile() {
+        let full = DaemonConfig::defaults_in("/tmp/x");
+        assert_eq!(full.bucket_wait_ceiling_ms(), 3_600_000);
+        assert_eq!(full.run_and_watch_ceiling_ms(), 3_600_000);
+        let mut hard = DaemonConfig::defaults_in("/tmp/x");
+        hard.policy.profile = PolicyProfile::DeveloperLocal;
+        assert_eq!(hard.bucket_wait_ceiling_ms(), 30_000);
+        assert_eq!(hard.run_and_watch_ceiling_ms(), 60_000);
+    }
+
+    #[test]
+    fn wait_ceiling_above_hard_cap_is_clamped_with_a_warning() {
+        let s = r#"
+            [daemon]
+            data_dir = "/tmp/x"
+
+            [policy]
+            profile = "developer_local"
+
+            [limits]
+            bucket_wait_max_ms = 9_999_999
+            run_and_watch_max_wait_ms = 45_000
+        "#;
+        let cfg = DaemonConfig::from_toml(s).unwrap();
+        assert_eq!(cfg.bucket_wait_ceiling_ms(), 3_600_000);
+        assert_eq!(cfg.run_and_watch_ceiling_ms(), 45_000);
+        assert!(
+            cfg.warnings
+                .iter()
+                .any(|w| w.contains("limits.bucket_wait_max_ms") && w.contains("hard cap")),
+            "warnings: {:?}",
+            cfg.warnings
+        );
+        assert_eq!(
+            cfg.warnings.len(),
+            1,
+            "set keys are not 'unknown': {:?}",
+            cfg.warnings
+        );
+    }
+
+    #[test]
+    fn wait_ceiling_zero_is_rejected() {
+        let s = r#"
+            [daemon]
+            data_dir = "/tmp/x"
+
+            [policy]
+            profile = "developer_local"
+
+            [limits]
+            bucket_wait_max_ms = 0
+        "#;
+        assert!(matches!(
+            DaemonConfig::from_toml(s),
+            Err(ConfigError::Validate(_))
+        ));
     }
 
     #[test]

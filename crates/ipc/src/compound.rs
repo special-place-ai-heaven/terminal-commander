@@ -60,6 +60,7 @@ pub struct RunAndWatchOutcome {
 }
 
 /// Start exactly once, then observe through the supplied engine until completion or a bound.
+/// The wait is clamped to [`RUN_AND_WATCH_MAX_WAIT_MS`]; see [`run_and_watch_with_ceiling`].
 ///
 /// Each bucket wait is at most one second and is bounded by the remaining wall-clock budget.
 /// Callback round trips may outlast that budget; in-flight operations are never cancelled or replayed.
@@ -70,13 +71,32 @@ pub struct RunAndWatchOutcome {
 pub async fn run_and_watch<F, Fut>(
     start: CommandStartParams,
     options: RunAndWatchOptions,
+    call: F,
+) -> Result<RunAndWatchOutcome, IpcError>
+where
+    F: FnMut(IpcRequest) -> Fut,
+    Fut: Future<Output = Result<IpcResponse, IpcError>>,
+{
+    run_and_watch_with_ceiling(start, options, RUN_AND_WATCH_MAX_WAIT_MS, call).await
+}
+
+/// [`run_and_watch`] with the observation budget clamped to `ceiling_ms`
+/// (the daemon's `run_and_watch_max_wait_ms`, read from `policy_status`)
+/// instead of the compiled-in [`RUN_AND_WATCH_MAX_WAIT_MS`].
+///
+/// # Errors
+/// Same as [`run_and_watch`].
+pub async fn run_and_watch_with_ceiling<F, Fut>(
+    start: CommandStartParams,
+    options: RunAndWatchOptions,
+    ceiling_ms: u64,
     mut call: F,
 ) -> Result<RunAndWatchOutcome, IpcError>
 where
     F: FnMut(IpcRequest) -> Fut,
     Fut: Future<Output = Result<IpcResponse, IpcError>>,
 {
-    let wait_ms = options.wait_ms.min(RUN_AND_WATCH_MAX_WAIT_MS);
+    let wait_ms = options.wait_ms.min(ceiling_ms);
     let max_signals = options.max_signals.min(RUN_AND_WATCH_MAX_SIGNALS);
     let IpcResponse::CommandStartCombed(started) =
         call(IpcRequest::CommandStartCombed(start)).await?
@@ -188,6 +208,7 @@ fn wait_request(
         kind_filter: None,
         limit: Some(max_signals.saturating_sub(outcome.signals.len()).max(1)),
         timeout_ms: Some(timeout_ms),
+        wake_mode: None,
     })
 }
 

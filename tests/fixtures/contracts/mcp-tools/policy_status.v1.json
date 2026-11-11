@@ -24,6 +24,8 @@
     "default_deny_path_suffix_count": 0,
     "file_window_bytes": 65536,
     "bucket_read_limit": 10000,
+    "bucket_wait_max_ms": 3600000,
+    "run_and_watch_max_wait_ms": 3600000,
     "caps": {
       "allow_shell": true,
       "allow_session": true,

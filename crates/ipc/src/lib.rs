@@ -99,6 +99,7 @@ pub use protocol::{
     WorkspaceSnapshotApplyResponse, WorkspaceSnapshotCreateParams, WorkspaceSnapshotCreateResponse,
     WslProbe, decode_payload, encode_frame, owner_prompt_text,
 };
+pub use protocol::{BUCKET_WAIT_HARD_CAP_MS, BucketJobExit};
 
 pub use framing::{ReadOutcome, read_frame, read_request, read_request_classified, write_response};
 

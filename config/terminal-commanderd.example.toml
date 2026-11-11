@@ -78,6 +78,15 @@ retention_days = 30
 # - bucket_read_limit   ceiling = 10 000  (MAX_READ_LIMIT)
 file_window_bytes = 65_536
 bucket_read_limit = 200
+# Longest wait `bucket_wait` / `run_and_watch` will honour, in ms. A caller's
+# `timeout_ms` / `wait_ms` is used as passed up to this ceiling; a longer
+# request is cut to it and the response says so (`timeout_clamped_to_ms`).
+# `policy_status` reports both. Omitted: 3_600_000 under `full_access` and
+# `admin_debug`, 30_000 / 60_000 on every other profile. Hard cap 3_600_000;
+# 0 is rejected. Independent of [governor]. A harness running a long wait
+# must allow its own MCP tool timeout of at least `timeout_ms` + 5 s.
+# bucket_wait_max_ms = 30_000
+# run_and_watch_max_wait_ms = 60_000
 
 [sifters]
 # Universal extractors (US2 / FR-009): LOW-severity baseline rules

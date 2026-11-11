@@ -285,8 +285,8 @@ const SPAWN_ACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(12)
 /// The transport deadline for a request that legitimately BLOCKS daemon-side,
 /// or `None` for ordinary requests (client-level timeout applies).
 ///
-/// `bucket_wait` holds its response up to the clamped `timeout_ms` (max
-/// [`MAX_BUCKET_WAIT_MS`] = 30 s) and `shell_session_exec` holds up to its
+/// `bucket_wait` holds its response up to the requested `timeout_ms` (the
+/// daemon may clamp it to its ceiling, which only shortens the hold) and `shell_session_exec` holds up to its
 /// clamped `wait_ms` settle window -- but the shared client cancels every
 /// round trip at a flat 5 s. A quiet bucket + `timeout_ms > 5s` therefore
 /// ALWAYS timed out client-side, self-healed (health is fast and fine),
@@ -302,7 +302,9 @@ const SPAWN_ACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(12)
 /// deadline does not make a timed-out start safe to re-send.
 fn blocking_deadline(request: &IpcRequest) -> Option<std::time::Duration> {
     match request {
-        IpcRequest::BucketWait(p) => Some(p.timeout() + BLOCKING_DEADLINE_MARGIN),
+        // The caller's own wait plus the margin, not a compiled-in cap: the
+        // daemon clamps to its ceiling, which can only shorten the hold.
+        IpcRequest::BucketWait(p) => Some(p.requested_timeout() + BLOCKING_DEADLINE_MARGIN),
         IpcRequest::ShellSessionExec(p) => p.wait_ms.map(|ms| {
             std::time::Duration::from_millis(ms.min(MAX_BUCKET_WAIT_MS)) + BLOCKING_DEADLINE_MARGIN
         }),
@@ -642,10 +644,9 @@ mod tests {
 
     #[test]
     fn blocking_deadline_covers_bucket_wait_hold() {
-        // A 55s request clamps to MAX_BUCKET_WAIT_MS daemon-side; the
-        // transport deadline must cover that clamped hold plus margin --
-        // before this, the flat 5s client cancelled every quiet wait > 5s
-        // and misreported a healthy daemon as unavailable.
+        // The transport deadline must cover the caller's whole requested
+        // wait plus margin -- before this, the flat 5s client cancelled every
+        // quiet wait > 5s and misreported a healthy daemon as unavailable.
         let p = terminal_commander_ipc::BucketWaitParams {
             bucket_id: terminal_commander_core::BucketId::new(),
             cursor: 0,
@@ -653,11 +654,21 @@ mod tests {
             kind_filter: None,
             limit: None,
             timeout_ms: Some(55_000),
+            wake_mode: None,
         };
-        let d = blocking_deadline(&IpcRequest::BucketWait(p)).expect("bucket_wait blocks");
+        let d = blocking_deadline(&IpcRequest::BucketWait(p.clone())).expect("bucket_wait blocks");
         assert_eq!(
             d,
-            std::time::Duration::from_millis(MAX_BUCKET_WAIT_MS) + BLOCKING_DEADLINE_MARGIN
+            std::time::Duration::from_secs(55) + BLOCKING_DEADLINE_MARGIN
+        );
+        // A 10-minute wait (the #284 case) is not cut at 30 s.
+        let long = terminal_commander_ipc::BucketWaitParams {
+            timeout_ms: Some(600_000),
+            ..p
+        };
+        assert_eq!(
+            blocking_deadline(&IpcRequest::BucketWait(long)),
+            Some(std::time::Duration::from_secs(604))
         );
     }
 

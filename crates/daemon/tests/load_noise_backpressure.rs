@@ -254,6 +254,7 @@ fn megabyte_scale_noisy_stdout_emits_signal_without_raw_leak() {
                         kind_filter: None,
                         limit: None,
                         timeout_ms: Some(1_000),
+                        wake_mode: None,
                     }),
                 )
                 .await
@@ -390,6 +391,7 @@ fn bucket_wait_heartbeat_respects_timeout_without_busy_poll() {
                     kind_filter: None,
                     limit: None,
                     timeout_ms: Some(800),
+                    wake_mode: None,
                 }),
             )
             .await
@@ -495,6 +497,7 @@ fn bucket_events_since_limit_clamps_to_max() {
                         kind_filter: None,
                         limit: None,
                         timeout_ms: Some(800),
+                        wake_mode: None,
                     }),
                 )
                 .await
@@ -653,6 +656,7 @@ fn concurrent_probes_buckets_do_not_cross_talk() {
                             kind_filter: None,
                             limit: None,
                             timeout_ms: Some(500),
+                            wake_mode: None,
                         }),
                     )
                     .await
@@ -679,6 +683,7 @@ fn concurrent_probes_buckets_do_not_cross_talk() {
                             kind_filter: None,
                             limit: None,
                             timeout_ms: Some(500),
+                            wake_mode: None,
                         }),
                     )
                     .await
@@ -911,6 +916,7 @@ fn event_context_window_stays_bounded() {
                         kind_filter: None,
                         limit: None,
                         timeout_ms: Some(800),
+                        wake_mode: None,
                     }),
                 )
                 .await
@@ -1043,6 +1049,7 @@ fn bucket_dropped_count_visible_when_retention_evicts() {
                         kind_filter: None,
                         limit: None,
                         timeout_ms: Some(500),
+                        wake_mode: None,
                     }),
                 )
                 .await
@@ -1197,6 +1204,7 @@ for i in range(120):
                         kind_filter: None,
                         limit: None,
                         timeout_ms: Some(500),
+                        wake_mode: None,
                     }),
                 )
                 .await

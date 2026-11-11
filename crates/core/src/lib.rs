@@ -44,8 +44,8 @@ pub use platform::{sanitize_wslenv, windows_silent, wslenv_overlay_value};
 
 pub use bucket::{
     BucketConfig, BucketError, BucketManager, BucketReadRequest, BucketReadResponse, BucketState,
-    BucketSummary, BucketWaitRequest, BucketWaitResponse, BySeverity, DEFAULT_MAX_EVENTS,
-    DEFAULT_READ_LIMIT, DEFAULT_TTL, MAX_READ_LIMIT,
+    BucketSummary, BucketWaitRequest, BucketWaitResponse, BucketWakeReason, BySeverity,
+    DEFAULT_MAX_EVENTS, DEFAULT_READ_LIMIT, DEFAULT_TTL, ExitProbe, MAX_READ_LIMIT, WakeMode,
 };
 pub use context::{
     ContextError, ContextLine, ContextRingConfig, ContextRingManager, ContextWindowRequest,

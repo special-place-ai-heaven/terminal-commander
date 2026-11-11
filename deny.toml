@@ -41,7 +41,12 @@ deny = []
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+ignore = [
+  { id = "RUSTSEC-2026-0459", reason = "store DB is daemon-owned in the user's state dir; no less-trusted writer of db/-wal. Bump tracked in #286" },
+  { id = "RUSTSEC-2026-0457", reason = "rmcp OAuth client not compiled (features server,macros,transport-io; no oauth2/reqwest in lock). Bump tracked in #286" },
+  { id = "RUSTSEC-2026-0461", reason = "Streamable HTTP server transport not compiled; TC serves stdio only. Bump tracked in #286" },
+  { id = "RUSTSEC-2026-0462", reason = "Streamable HTTP clients not compiled (no reqwest/hyper in lock). Bump tracked in #286" },
+]
 
 [sources]
 unknown-registry = "deny"

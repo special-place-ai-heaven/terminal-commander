@@ -125,6 +125,18 @@ impl JobManager {
         id
     }
 
+    /// The job that owns `bucket_id` (the most recently started when a bucket
+    /// has been reused), or `None` when no job record points at it.
+    #[must_use]
+    pub fn job_for_bucket(&self, bucket_id: BucketId) -> Option<JobId> {
+        self.inner
+            .read()
+            .iter()
+            .filter(|(_, rec)| rec.config.bucket_id == bucket_id)
+            .max_by_key(|(_, rec)| rec.started_at)
+            .map(|(id, _)| *id)
+    }
+
     /// Move a job from Starting to Running. Idempotent.
     pub fn mark_running(&self, job_id: JobId) {
         if let Some(rec) = self.inner.write().get_mut(&job_id)
