@@ -121,6 +121,15 @@ impl LiveDaemon {
             .take()
             .expect("stdin")
             .write_all(stdin.as_bytes())
+            .or_else(|e| {
+                // The CLI may exit before reading stdin; its exit status and stderr
+                // (asserted by the caller) carry the real failure.
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
             .expect("write stdin");
         child.wait_with_output().expect("cli output")
     }
