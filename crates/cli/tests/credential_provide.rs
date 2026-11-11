@@ -167,7 +167,11 @@ async fn wait_awaiting(client: &DaemonClient, job_id: JobId) {
 fn assert_refused_before_read(out: &std::process::Output) {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_ne!(out.status.code(), Some(0), "stdout={stdout} stderr={stderr}");
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "stdout={stdout} stderr={stderr}"
+    );
     assert!(!stderr.contains("Password:"), "read stdin: {stderr}");
     assert!(!stdout.contains("provided"), "{stdout}");
 }
@@ -250,7 +254,10 @@ fn credential_provide_reads_stdin_and_the_job_receives_it() {
     assert_refused_before_read(&again);
     let again_stderr = String::from_utf8_lossy(&again.stderr);
     let reasons = ["is not live", "not waiting for a password"];
-    assert!(reasons.iter().any(|r| again_stderr.contains(r)), "{again_stderr}");
+    assert!(
+        reasons.iter().any(|r| again_stderr.contains(r)),
+        "{again_stderr}"
+    );
     let _ = rt.block_on(call(
         &client,
         IpcRequest::PtyCommandStop(PtyCommandStopParams { job_id }),
