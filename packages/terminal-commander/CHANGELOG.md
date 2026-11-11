@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.18](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.17...v0.3.18) (2026-11-11)
+
+
+### Bug Fixes
+
+* **deps:** bump rmcp and rusqlite for RUSTSEC advisories ([#288](https://github.com/special-place-ai-heaven/terminal-commander/issues/288)) ([81f0981](https://github.com/special-place-ai-heaven/terminal-commander/commit/81f098102c28fc6d17c8d33eb09bbe1cb167ec96))
+
 ## [0.3.17](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.16...v0.3.17) (2026-11-05)
 
 
