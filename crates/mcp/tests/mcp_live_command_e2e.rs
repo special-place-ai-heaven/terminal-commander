@@ -295,10 +295,11 @@ async fn full_command_lifecycle_through_mcp_yields_only_structured_signal() {
         );
         let heartbeat: serde_json::Value =
             serde_json::from_str(&heartbeat_payload).expect("heartbeat JSON");
-        assert_eq!(
-            heartbeat["heartbeat"].as_bool(),
-            Some(true),
-            "bucket_wait on a quiet bucket must heartbeat; got: {heartbeat_payload}"
+        // #284: the job has already ended, so the wait returns at once with
+        // its exit instead of holding for a heartbeat.
+        assert!(
+            heartbeat["heartbeat"].as_bool() == Some(true) || heartbeat.get("job_exit").is_some(),
+            "quiet bucket must heartbeat or report the job exit; got: {heartbeat_payload}"
         );
         assert!(
             heartbeat["events"].as_array().is_some_and(Vec::is_empty),
