@@ -842,13 +842,14 @@ impl DaemonConfig {
         if self.limits.bucket_read_limit > HARD_MAX_READ_LIMIT {
             self.limits.bucket_read_limit = HARD_MAX_READ_LIMIT;
         }
-        for ceiling in [
+        for v in [
             &mut self.limits.bucket_wait_max_ms,
             &mut self.limits.run_and_watch_max_wait_ms,
-        ] {
-            if let Some(v) = ceiling {
-                *v = (*v).min(BUCKET_WAIT_HARD_CAP_MS);
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *v = (*v).min(BUCKET_WAIT_HARD_CAP_MS);
         }
         Ok(())
     }
