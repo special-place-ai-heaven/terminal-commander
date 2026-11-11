@@ -192,17 +192,12 @@ async fn connect(
     let server_task =
         tokio::spawn(async move { server.serve(server_transport).await.expect("server serve") });
     let client = client
-        .serve_with_lifecycle(
-            client_transport,
-            rmcp::ClientLifecycleMode::Discover {
-                preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
-            },
-        )
+        .serve(client_transport)
         .await
         .expect("client serve");
-    // rmcp >=3.5.1: the server answers discover, then waits for the first
-    // non-discover request; send one before joining the server task.
-    client.list_all_tools().await.expect("first real request");
+    // The server asks the client to elicit mid-call, which needs the stateful
+    // initialize handshake (discover is stateless in rmcp >=3.5.1). Initialize
+    // is answered at once, so joining the server task cannot hang.
     (server_task.await.expect("server join"), client)
 }
 
