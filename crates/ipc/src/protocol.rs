@@ -1611,9 +1611,8 @@ impl BucketWaitParams {
     /// The wait the daemon will honour: the request clamped to `ceiling_ms`.
     #[must_use]
     pub fn effective_timeout(&self, ceiling_ms: u64) -> Duration {
-        let _ = ceiling_ms;
         self.requested_timeout()
-            .min(Duration::from_millis(MAX_BUCKET_WAIT_MS))
+            .min(Duration::from_millis(ceiling_ms))
     }
 
     /// Resolve the effective `Duration`, clamping to the old 30 s constant.
