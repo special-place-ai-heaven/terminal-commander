@@ -642,7 +642,10 @@ async fn a_stale_elicitation_id_on_a_discover_retry_does_not_accept_the_newer_pa
             .find_map(|c| c.as_text().map(|t| t.text.clone()))
             .expect("text content");
         assert!(text.contains("owner_action_required"), "{text}");
-        assert!(page_is_closed(&url).await, "the stale retry must close the page");
+        assert!(
+            page_is_closed(&url).await,
+            "the stale retry must close the page"
+        );
         assert_eq!(owner.elicitations.load(Ordering::SeqCst), 1);
 
         let _ = call(
@@ -656,8 +659,6 @@ async fn a_stale_elicitation_id_on_a_discover_retry_does_not_accept_the_newer_pa
     handle.shutdown().await;
     let _ = std::fs::remove_dir_all(&data);
 }
-
-
 
 /// The residual gap: a client that ACCEPTS the elicitation but never shows
 /// the link. Nobody opens the page, so after the open deadline the daemon
