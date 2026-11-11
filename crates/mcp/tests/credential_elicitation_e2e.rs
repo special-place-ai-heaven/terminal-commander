@@ -594,6 +594,71 @@ async fn a_discover_client_declining_the_elicitation_falls_back_in_the_same_call
     untaken_elicitation_falls_back("decline-discover", Reply::Decline, true).await;
 }
 
+/// Discover handshake: a late retry that carries a stale elicitation id must
+/// not accept the page the daemon holds now. It closes that page and falls
+/// back as on decline, instead of answering `pending` on a page it never
+/// asked the owner to open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_elicitation_id_on_a_discover_retry_does_not_accept_the_newer_page() {
+    let Some(python) = python3() else {
+        eprintln!("skipping: python3 not found");
+        return;
+    };
+    let data = tmp_data_dir("stale-discover");
+    let handle = spawn_daemon(&data);
+    {
+        let owner = OwnerClient {
+            url_mode: true,
+            reply: Reply::AcceptNeverOpen,
+            ..OwnerClient::default()
+        };
+        let (_server, client) = connect_with(&handle, owner.clone(), true).await;
+        let job_id = start_prompting_child(&client, python).await;
+
+        // The client's own round trip accepts the current page.
+        let _ = call(
+            &client,
+            "credential_request",
+            serde_json::json!({"job_id": job_id}),
+        )
+        .await;
+        assert_eq!(owner.elicitations.load(Ordering::SeqCst), 1);
+        let url = owner.urls.lock().unwrap()[0].clone();
+
+        // A late retry of an earlier prompt: accept, but a stale id.
+        let mut answers = rmcp::model::InputResponses::new();
+        answers.insert(
+            "owner_page".to_owned(),
+            serde_json::json!({"action": "accept"}),
+        );
+        let mut params = CallToolRequestParams::new("credential_request")
+            .with_input_responses(answers)
+            .with_request_state("stale-elicitation-id");
+        params.arguments = serde_json::json!({"job_id": job_id}).as_object().cloned();
+        let result = client.call_tool(params).await.expect("stale retry");
+        let text = result
+            .content
+            .iter()
+            .find_map(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("text content");
+        assert!(text.contains("owner_action_required"), "{text}");
+        assert!(page_is_closed(&url).await, "the stale retry must close the page");
+        assert_eq!(owner.elicitations.load(Ordering::SeqCst), 1);
+
+        let _ = call(
+            &client,
+            "pty_command_stop",
+            serde_json::json!({"job_id": job_id}),
+        )
+        .await;
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+
+
 /// The residual gap: a client that ACCEPTS the elicitation but never shows
 /// the link. Nobody opens the page, so after the open deadline the daemon
 /// closes it and asks through the native prompt (here answering), without

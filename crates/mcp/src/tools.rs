@@ -3062,6 +3062,20 @@ impl TerminalCommanderMcpServer {
                 .unwrap_or("error");
             let elicitation_id = request_state.filter(|s| !s.is_empty());
             if let (true, Some(elicitation_id)) = (action == "accept", elicitation_id) {
+                // The id the client sends back must name the daemon's current
+                // page. A stale id (a late retry of an earlier prompt) never
+                // accepts a newer prompt's page: close it and fall back as on
+                // decline. `Open` re-finds the live page (`fresh == false`);
+                // a `fresh` one was just created for this stale retry.
+                let current = self.open_owner_page(job_id).await;
+                if !current
+                    .as_ref()
+                    .is_some_and(|p| !p.fresh && p.elicitation_id == elicitation_id)
+                {
+                    eprintln!("{}", elicitation_log_line(job_id, client, "stale"));
+                    self.abandon_owner_page(job_id).await;
+                    return OwnerPageStep::Settled(false);
+                }
                 eprintln!("{}", elicitation_log_line(job_id, client, "accepted"));
                 // Arms the page's open deadline: unopened, it falls back by itself.
                 let _ = self

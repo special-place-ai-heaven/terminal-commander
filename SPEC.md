@@ -167,7 +167,7 @@ update.
   `docs/research/mcp-rust-sdk.md`).
 - MCP SDK: rmcp `=3.9.0` exact pin (was `=1.8.0` at TC01; see root
   `Cargo.toml`). MSRV Rust 1.92.
-- Storage: rusqlite 0.40 with `bundled` feature (FTS5 included) +
+- Storage: rusqlite 0.42 with `bundled` feature (FTS5 included) +
   a manual migration runner (refinery is not linked) + WAL mode. See
   `docs/research/sqlite-fts5.md`.
 - File watcher: notify 8.2, event-driven on native filesystems; the
