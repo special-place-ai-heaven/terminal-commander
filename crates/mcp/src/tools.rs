@@ -3071,7 +3071,12 @@ impl TerminalCommanderMcpServer {
                         op: CredentialUrlOp::Accepted,
                     }))
                     .await;
-                tokio::spawn(settle_page(self.daemon.clone(), peer, job_id, elicitation_id));
+                tokio::spawn(settle_page(
+                    self.daemon.clone(),
+                    peer,
+                    job_id,
+                    elicitation_id,
+                ));
                 return OwnerPageStep::Settled(true);
             }
             let outcome = match action {
@@ -6942,8 +6947,6 @@ async fn settle_page(
         }
     }
 }
-
-
 
 /// The owner's elicitation dialog. Only accept keeps the page: decline,
 /// cancel, an error, or no answer within [`ELICIT_ACK_MS`] closes it, so the
