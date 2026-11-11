@@ -56,7 +56,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use terminal_commander_core::{
-    BucketConfig, RecipeDefinition, RuleDefinition, RuleType, Severity, WakeMode,
+    BucketConfig, BucketWakeReason, RecipeDefinition, RuleDefinition, RuleType, Severity, WakeMode,
 };
 use terminal_commanderd::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
@@ -6220,12 +6220,18 @@ fn bucket_events_payload(r: &BucketEventsSinceResponse, compact: bool) -> serde_
 }
 
 fn bucket_wait_payload(r: &BucketWaitResponse, compact: bool) -> serde_json::Value {
+    // An older daemon sends no `wake_reason`: infer it from the events.
+    let wake_reason = r.wake_reason.unwrap_or(if r.events.is_empty() {
+        BucketWakeReason::Timeout
+    } else {
+        BucketWakeReason::Append
+    });
     let mut payload = serde_json::json!({
         "bucket_id": r.bucket_id,
         "cursor_in": r.cursor_in,
         "next_cursor": r.next_cursor,
         "heartbeat": r.heartbeat,
-        "wake_reason": r.wake_reason,
+        "wake_reason": wake_reason,
         "dropped_count": r.dropped_count,
         "events": project_events(&r.events, compact),
     });

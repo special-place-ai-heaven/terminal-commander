@@ -262,7 +262,7 @@ least `timeout_ms` + 5 s.
 Response:
 ```text
 bucket_id, cursor_in, next_cursor, heartbeat: bool, dropped_count, events,
-wake_reason: "append"|"match"|"exit"|"timeout",
+wake_reason: "append"|"match"|"exit"|"timeout"?   absent only from an older daemon,
 timeout_clamped_to_ms: u64?   only when the request was cut to the ceiling,
 job_exit: { job_id, state, exit_code?, exit_reason? }?   when wake_reason = exit
 ```
@@ -270,7 +270,12 @@ job_exit: { job_id, state, exit_code?, exit_reason? }?   when wake_reason = exit
 Contract: when `wake_reason = timeout`, `heartbeat = true` and `events`
 is empty. An `any`-mode wake whose append the filters rejected also returns an
 empty `events` with `heartbeat = true` (`wake_reason = append`), as before.
-An older daemon omits `wake_reason`, which decodes as `timeout`.
+An `exit` wake with no matching events also carries `heartbeat = true`:
+`heartbeat` is true exactly when `events` is empty; `wake_reason` tells the
+cases apart.
+`heartbeat = false` always carries non-empty `events`. An older daemon omits
+`wake_reason`: it decodes as absent (`None`, never `timeout`), and MCP reports
+`append` when `events` is non-empty, else `timeout`.
 
 ### `bucket_summary`
 

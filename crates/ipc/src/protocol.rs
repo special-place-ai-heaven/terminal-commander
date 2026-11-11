@@ -1653,9 +1653,11 @@ pub struct BucketWaitResponse {
     /// ceiling that was applied instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_clamped_to_ms: Option<u64>,
-    /// Why the wait returned.
-    #[serde(default)]
-    pub wake_reason: BucketWakeReason,
+    /// Why the wait returned. `None` only from a daemon older than
+    /// terminal-commander#284, which never sets it; the current daemon always
+    /// sends `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_reason: Option<BucketWakeReason>,
     /// Present when the bucket's job has ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_exit: Option<BucketJobExit>,

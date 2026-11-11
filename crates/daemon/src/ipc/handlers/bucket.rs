@@ -95,7 +95,7 @@ pub(in crate::ipc::server) async fn handle_bucket_wait(
         dropped_count: resp.dropped_count,
         events: resp.events,
         timeout_clamped_to_ms,
-        wake_reason: resp.wake_reason,
+        wake_reason: Some(resp.wake_reason),
         job_exit,
     }))
 }

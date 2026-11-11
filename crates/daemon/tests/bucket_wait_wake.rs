@@ -130,8 +130,8 @@ fn bucket_wait_match_mode_returns_on_exit() {
             t0.elapsed() < Duration::from_secs(15),
             "did not return at exit"
         );
-        assert_eq!(w.wake_reason, BucketWakeReason::Exit, "{w:?}");
-        assert!(!w.heartbeat, "{w:?}");
+        assert_eq!(w.wake_reason, Some(BucketWakeReason::Exit), "{w:?}");
+        assert!(w.heartbeat, "{w:?}");
         assert!(w.events.is_empty(), "{w:?}");
         assert_eq!(w.timeout_clamped_to_ms, None);
         let exit = w.job_exit.expect("job_exit on an exit wake");
@@ -167,7 +167,7 @@ fn bucket_wait_hardened_ceiling_clamps() {
         let w = call_wait(&client, wait_params(bucket, 600_000)).await;
         assert!(t0.elapsed() < Duration::from_secs(10), "clamp not applied");
         assert!(w.heartbeat, "{w:?}");
-        assert_eq!(w.wake_reason, BucketWakeReason::Timeout);
+        assert_eq!(w.wake_reason, Some(BucketWakeReason::Timeout));
         assert_eq!(w.timeout_clamped_to_ms, Some(300), "{w:?}");
         // Under the ceiling: no clamp note.
         let w = call_wait(&client, wait_params(bucket, 100)).await;
@@ -217,7 +217,7 @@ fn bucket_wait_default_mode_unchanged() {
         };
         state.router.bucket_append(bucket, low).unwrap();
         let w = waiter.await.unwrap();
-        assert_eq!(w.wake_reason, BucketWakeReason::Append, "{w:?}");
+        assert_eq!(w.wake_reason, Some(BucketWakeReason::Append), "{w:?}");
         assert!(w.events.is_empty());
         assert_eq!(w.timeout_clamped_to_ms, None);
         assert!(w.job_exit.is_none());
@@ -228,7 +228,7 @@ fn bucket_wait_default_mode_unchanged() {
         p.cursor = w.next_cursor;
         let w = call_wait(&client, p).await;
         assert!(w.heartbeat);
-        assert_eq!(w.wake_reason, BucketWakeReason::Timeout);
+        assert_eq!(w.wake_reason, Some(BucketWakeReason::Timeout));
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&data);
     });

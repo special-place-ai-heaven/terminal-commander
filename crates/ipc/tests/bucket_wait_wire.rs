@@ -34,5 +34,28 @@ fn bucket_wait_params_old_payload_deserializes() {
     let r: BucketWaitResponse = serde_json::from_value(resp).unwrap();
     assert_eq!(r.timeout_clamped_to_ms, None);
     assert!(r.job_exit.is_none());
-    assert_eq!(r.wake_reason, BucketWakeReason::Timeout);
+    assert_eq!(r.wake_reason, None, "absent is not timeout");
+    // An old daemon's response WITH events must not read as a timeout.
+    let old_with_events = serde_json::json!({
+        "bucket_id": id, "cursor_in": 0, "next_cursor": 1,
+        "heartbeat": false, "dropped_count": 0, "events": []
+    });
+    let r: BucketWaitResponse = serde_json::from_value(old_with_events).unwrap();
+    assert_eq!(r.wake_reason, None);
+    // A current daemon's reason round-trips.
+    let new = serde_json::json!({
+        "bucket_id": id, "cursor_in": 0, "next_cursor": 0, "heartbeat": true,
+        "dropped_count": 0, "events": [], "wake_reason": "exit"
+    });
+    let r: BucketWaitResponse = serde_json::from_value(new).unwrap();
+    assert_eq!(r.wake_reason, Some(BucketWakeReason::Exit));
+    let reserialized = BucketWaitResponse {
+        wake_reason: None,
+        ..r
+    };
+    assert!(
+        !serde_json::to_string(&reserialized)
+            .unwrap()
+            .contains("wake_reason")
+    );
 }

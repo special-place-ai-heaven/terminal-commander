@@ -627,7 +627,9 @@ impl BucketManager {
                 return Ok(respond(false, reason));
             }
             if job_ended() {
-                return Ok(respond(false, BucketWakeReason::Exit));
+                // Contract: heartbeat is true exactly when no events are
+                // carried; `wake_reason = exit` tells this apart from a timeout.
+                return Ok(respond(true, BucketWakeReason::Exit));
             }
             if woken_by_append && !match_only {
                 // Historical behaviour: the append woke us but the filters
@@ -1249,7 +1251,7 @@ mod tests {
                 .unwrap();
             let resp = waiter.await.unwrap().unwrap();
             assert_eq!(resp.wake_reason, BucketWakeReason::Exit);
-            assert!(!resp.heartbeat);
+            assert!(resp.heartbeat, "empty exit wake is a heartbeat");
             assert!(resp.events.is_empty());
         });
     }

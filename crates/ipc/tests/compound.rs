@@ -65,7 +65,7 @@ const fn bucket(
         dropped_count: 0,
         events,
         timeout_clamped_to_ms: None,
-        wake_reason: terminal_commander_core::BucketWakeReason::Timeout,
+        wake_reason: Some(terminal_commander_core::BucketWakeReason::Timeout),
         job_exit: None,
     })
 }
