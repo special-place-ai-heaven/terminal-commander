@@ -587,6 +587,8 @@ allow_remote  = false
 [limits]
 file_window_bytes = 65536  # cap on one file_read_window (also the maximum)
 bucket_read_limit = 10000  # cap on events per bucket read (also the maximum)
+bucket_wait_max_ms = 30000         # longest bucket_wait honoured (hard cap 3600000; 0 is rejected)
+run_and_watch_max_wait_ms = 60000  # longest run_and_watch wait honoured (same bounds)
 
 [shell_session]
 max_sessions  = 16

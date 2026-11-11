@@ -2,14 +2,15 @@
 // Copyright 2026 The Terminal Commander Authors
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::common::map_bucket_error;
 use crate::ipc::protocol::{
-    BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
-    BucketWaitParams, BucketWaitResponse, ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT,
-    DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, EventContextParams, EventContextResponse,
-    IpcContextFrame, IpcError, IpcErrorCode, IpcResponse, MAX_BUCKET_READ_LIMIT, MAX_CONTEXT_BYTES,
-    MAX_CONTEXT_FRAMES, SeverityHistogram,
+    BucketEventsSinceParams, BucketEventsSinceResponse, BucketJobExit, BucketSummaryParams,
+    BucketSummaryResponse, BucketWaitParams, BucketWaitResponse, ContextUnavailableReason,
+    DEFAULT_BUCKET_READ_LIMIT, DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, EventContextParams,
+    EventContextResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcResponse,
+    MAX_BUCKET_READ_LIMIT, MAX_CONTEXT_BYTES, MAX_CONTEXT_FRAMES, SeverityHistogram,
 };
 use crate::state::DaemonState;
 
@@ -47,26 +48,45 @@ pub(in crate::ipc::server) async fn handle_bucket_wait(
     state: &Arc<DaemonState>,
     params: &BucketWaitParams,
 ) -> Result<IpcResponse, IpcError> {
-    use terminal_commander_core::BucketWaitRequest;
+    use terminal_commander_core::{BucketWaitRequest, BucketWakeReason, ExitProbe};
     let limit = params
         .limit
         .unwrap_or(DEFAULT_BUCKET_READ_LIMIT)
         .min(MAX_BUCKET_READ_LIMIT)
         .min(state.config.limits.bucket_read_limit);
+    // The caller's wait is honoured up to the configured ceiling; say so when
+    // it was cut, so the model can tell a short wait from a short answer.
+    let ceiling_ms = state.config.bucket_wait_ceiling_ms();
+    let requested = params.requested_timeout();
+    let timeout_clamped_to_ms =
+        (requested > Duration::from_millis(ceiling_ms)).then_some(ceiling_ms);
+    // The job that owns this bucket, if any: a wait on it returns when it ends.
+    let job_id = state.jobs.job_for_bucket(params.bucket_id);
+    let exit_probe = job_id.map(|id| {
+        let jobs = Arc::clone(&state.jobs);
+        ExitProbe(Arc::new(move || ended_job(&jobs, id)))
+    });
     let req = BucketWaitRequest {
         cursor: params.cursor,
         severity_min: params.severity_min,
         kind_filter: params.kind_filter.clone(),
         limit: Some(limit),
-        timeout: params.effective_timeout(state.config.bucket_wait_ceiling_ms()),
+        timeout: params.effective_timeout(ceiling_ms),
         wake_mode: params.wake_mode.unwrap_or_default(),
-        exit_probe: None,
+        exit_probe,
     };
     let resp = state
         .router
         .bucket_wait(params.bucket_id, req)
         .await
         .map_err(map_bucket_error)?;
+    // Reported on the wake that ended the wait because the job ended; a read
+    // that merely finds events keeps its historical shape.
+    let job_exit = if resp.wake_reason == BucketWakeReason::Exit {
+        job_id.and_then(|id| job_exit_of(&state.jobs, id))
+    } else {
+        None
+    };
     Ok(IpcResponse::BucketWait(BucketWaitResponse {
         bucket_id: params.bucket_id,
         cursor_in: resp.cursor_in,
@@ -74,10 +94,41 @@ pub(in crate::ipc::server) async fn handle_bucket_wait(
         heartbeat: resp.heartbeat,
         dropped_count: resp.dropped_count,
         events: resp.events,
-        timeout_clamped_to_ms: None,
+        timeout_clamped_to_ms,
         wake_reason: resp.wake_reason,
-        job_exit: None,
+        job_exit,
     }))
+}
+
+/// `true` once the job has reached a terminal state.
+fn ended_job(
+    jobs: &terminal_commander_core::JobManager,
+    id: terminal_commander_core::JobId,
+) -> bool {
+    use terminal_commander_core::JobState;
+    jobs.get(id).is_some_and(|rec| {
+        matches!(
+            rec.state,
+            JobState::Exited | JobState::Failed | JobState::Cancelled
+        )
+    })
+}
+
+/// How the job ended, or `None` while it is still running.
+fn job_exit_of(
+    jobs: &terminal_commander_core::JobManager,
+    id: terminal_commander_core::JobId,
+) -> Option<BucketJobExit> {
+    let rec = jobs.get(id)?;
+    if !ended_job(jobs, id) {
+        return None;
+    }
+    Some(BucketJobExit {
+        job_id: id,
+        state: rec.state,
+        exit_code: rec.exit_info.as_ref().and_then(|e| e.exit_code),
+        exit_reason: rec.exit_info.and_then(|e| e.signal),
+    })
 }
 
 pub(in crate::ipc::server) fn handle_bucket_summary(

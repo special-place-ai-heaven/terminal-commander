@@ -46,6 +46,9 @@ use crate::event::SignalEvent;
 use crate::ids::BucketId;
 use crate::severity::Severity;
 
+/// How often a wait with an [`ExitProbe`] re-checks it between wake-ups.
+const EXIT_RECHECK: Duration = Duration::from_secs(1);
+
 /// Default per-bucket maximum event count (operator-tunable).
 pub const DEFAULT_MAX_EVENTS: usize = 10_000;
 
@@ -566,7 +569,15 @@ impl BucketManager {
     /// heartbeat response when the timeout elapses without
     /// matching events.
     ///
-    /// Backed by `tokio::sync::Notify` — no polling, no busy wait.
+    /// [`WakeMode::Any`] (the default) returns on the first append even when
+    /// the caller's filters reject it. [`WakeMode::Match`] keeps waiting
+    /// until an event passes the filters. In both modes a job-ended
+    /// [`ExitProbe`] ends the wait with [`BucketWakeReason::Exit`].
+    ///
+    /// Backed by `tokio::sync::Notify` and a deadline on tokio's clock: no
+    /// busy wait. With an exit probe the wait also re-checks it once a
+    /// second, so an exit whose lifecycle event was filtered or lost cannot
+    /// strand the caller until the timeout.
     pub async fn bucket_wait(
         &self,
         bucket_id: BucketId,
@@ -585,45 +596,50 @@ impl BucketManager {
             kind_filter: request.kind_filter.clone(),
             limit: request.limit,
         };
+        let match_only = request.wake_mode == WakeMode::Match;
+        let job_ended = || request.exit_probe.as_ref().is_some_and(|p| (p.0)());
+        let deadline = tokio::time::Instant::now() + request.timeout;
+        let mut woken_by_append = false;
 
-        // Fast path: if events already match, return immediately.
-        let now_resp = self.events_since(bucket_id, &read_req)?;
-        if !now_resp.events.is_empty() {
-            return Ok(BucketWaitResponse {
+        loop {
+            // Arm the wake-up BEFORE reading, so an append that lands between
+            // the read and the await is not lost.
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            let resp = self.events_since(bucket_id, &read_req)?;
+            let respond = |heartbeat: bool, reason: BucketWakeReason| BucketWaitResponse {
                 bucket_id,
                 cursor_in: request.cursor,
-                next_cursor: now_resp.next_cursor,
-                heartbeat: false,
-                events: now_resp.events,
-                dropped_count: now_resp.dropped_count,
-                wake_reason: BucketWakeReason::Timeout,
-            });
-        }
-
-        // Slow path: wait on the notifier, racing the timeout.
-        let notified = notify.notified();
-        tokio::pin!(notified);
-        let outcome = tokio::time::timeout(request.timeout, notified.as_mut()).await;
-        match outcome {
-            Ok(()) => {
-                // Wake-up: read again. Even if filters reject the new
-                // events, we return what we found (possibly empty).
-                let resp = self.events_since(bucket_id, &read_req)?;
-                let heartbeat = resp.events.is_empty();
-                Ok(BucketWaitResponse {
-                    bucket_id,
-                    cursor_in: request.cursor,
-                    next_cursor: resp.next_cursor,
-                    heartbeat,
-                    events: resp.events,
-                    dropped_count: resp.dropped_count,
-                    wake_reason: BucketWakeReason::Timeout,
-                })
+                next_cursor: resp.next_cursor.max(request.cursor),
+                heartbeat,
+                events: resp.events.clone(),
+                dropped_count: resp.dropped_count,
+                wake_reason: reason,
+            };
+            if !resp.events.is_empty() {
+                let reason = if match_only {
+                    BucketWakeReason::Match
+                } else {
+                    BucketWakeReason::Append
+                };
+                return Ok(respond(false, reason));
             }
-            Err(_elapsed) => {
+            if job_ended() {
+                return Ok(respond(false, BucketWakeReason::Exit));
+            }
+            if woken_by_append && !match_only {
+                // Historical behaviour: the append woke us but the filters
+                // rejected it; return the empty read.
+                return Ok(respond(true, BucketWakeReason::Append));
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
                 // Timeout: heartbeat with the bucket's current tail seq.
                 let state = self.state(bucket_id)?;
-                Ok(BucketWaitResponse {
+                return Ok(BucketWaitResponse {
                     bucket_id,
                     cursor_in: request.cursor,
                     next_cursor: state.tail_seq.max(request.cursor),
@@ -631,8 +647,16 @@ impl BucketManager {
                     events: Vec::new(),
                     dropped_count: state.dropped_count,
                     wake_reason: BucketWakeReason::Timeout,
-                })
+                });
             }
+            let wake_at = if request.exit_probe.is_some() {
+                deadline.min(now + EXIT_RECHECK)
+            } else {
+                deadline
+            };
+            woken_by_append = tokio::time::timeout_at(wake_at, notified.as_mut())
+                .await
+                .is_ok();
         }
     }
 

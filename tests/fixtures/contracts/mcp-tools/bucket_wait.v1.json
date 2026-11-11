@@ -31,6 +31,7 @@
       "cursor_in": 2,
       "next_cursor": 3,
       "heartbeat": false,
+      "wake_reason": "match",
       "dropped_count": 0,
       "events": [
         {
@@ -65,6 +66,31 @@
       "cursor_in": 3,
       "next_cursor": 3,
       "heartbeat": true,
+      "wake_reason": "timeout",
+      "dropped_count": 0,
+      "events": []
+    },
+    "exit": {
+      "bucket_id": "bkt_018f0000000000000000000000000001",
+      "cursor_in": 3,
+      "next_cursor": 3,
+      "heartbeat": false,
+      "wake_reason": "exit",
+      "dropped_count": 0,
+      "events": [],
+      "job_exit": {
+        "job_id": "job_018f0000000000000000000000000001",
+        "state": "exited",
+        "exit_code": 0
+      }
+    },
+    "clamped": {
+      "bucket_id": "bkt_018f0000000000000000000000000001",
+      "cursor_in": 3,
+      "next_cursor": 3,
+      "heartbeat": true,
+      "wake_reason": "timeout",
+      "timeout_clamped_to_ms": 30000,
       "dropped_count": 0,
       "events": []
     }
@@ -95,7 +121,9 @@
     "cursor description teaches pass-0-then-next_cursor pagination (TB-8)",
     "bucket_id description carries the bkt_ opaque-id format note (TB-8)",
     "heartbeat=true implies events=[]",
-    "heartbeat=false implies events is non-empty",
+    "heartbeat=false with events=[] only when wake_reason=exit; job_exit then carries the job's end state",
+    "timeout_ms is honoured up to the daemon ceiling bucket_wait_max_ms (policy_status); a longer request is cut and timeout_clamped_to_ms names the ceiling",
+    "wake_mode=match ignores appends the filters reject; wake_mode any/absent returns on the first append",
     "success payload never contains raw stdout or stderr dumps",
     "US4/FR-030: compact:true projects signals to {summary,stream,seq,severity} and echoes compact:true; compact omitted is byte-identical and full records stay re-fetchable by the same cursor"
   ]

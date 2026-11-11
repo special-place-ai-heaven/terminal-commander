@@ -40,7 +40,7 @@ TC39 added the realtime signal-retrieval methods:
 | Method | Purpose | Bound |
 |---|---|---|
 | `bucket_events_since` | Cursor-based bucket read. | `MAX_BUCKET_READ_LIMIT = 10_000` events; default 200. |
-| `bucket_wait` | Realtime wait. Notify-backed (no busy poll). Heartbeat on timeout. | `MAX_BUCKET_WAIT_MS = 30_000`; default 5000. |
+| `bucket_wait` | Realtime wait. Notify-backed (no busy poll). Heartbeat on timeout. | Default 5000 ms; `timeout_ms` honoured up to `[limits] bucket_wait_max_ms` (3 600 000 under `full_access`/`admin_debug`, 30 000 otherwise; hard cap 3 600 000). |
 | `bucket_summary` | Counters + severity histogram. | Small JSON; no event payloads. |
 | `event_context` | Bounded context window around an event's `SourcePointer`. Resolved by `(bucket_id, event_id)`. | `MAX_CONTEXT_FRAMES = 1024`; `MAX_CONTEXT_BYTES = 64 KiB`. |
 
@@ -235,20 +235,42 @@ lane.
 
 Same params as `bucket_events_since` plus:
 ```text
-timeout_ms     u64?            optional; clamped to MAX_BUCKET_WAIT_MS
+timeout_ms     u64?            optional (default 5000); honoured as passed up to the
+                               daemon ceiling [limits] bucket_wait_max_ms
+wake_mode      "any"|"match"?  optional; absent = any
 ```
 
 Notify-backed (no busy polling). Returns immediately if events are
 already past `cursor`. Otherwise parks on the bucket's `tokio::sync::
-Notify` until either a matching event lands or the timeout fires.
+Notify` until a wake-up, the job ends, or the timeout fires.
+
+- `any` (default, unchanged): the first append wakes the wait even when
+  `severity_min` / `kind_filter` reject it; the empty read is returned.
+- `match`: appends the filters reject do not end the wait. It returns only
+  when an event passes the filters, the watched job ends, or the timeout fires.
+- In both modes, when the bucket's job has ended the call returns at once with
+  `wake_reason = exit` and `job_exit`, whether or not a rule matched.
+
+The ceiling is `[limits] bucket_wait_max_ms`; omitted, it is 3 600 000 ms
+under `full_access` / `admin_debug` and 30 000 ms on every other profile
+(hard cap 3 600 000; 0 is rejected). `policy_status` reports it as
+`bucket_wait_max_ms` (and `run_and_watch_max_wait_ms`). A request above it is
+cut to it and the response says so. The transport deadline for the call is
+`timeout_ms` + 4 s; an MCP harness must allow its own tool timeout of at
+least `timeout_ms` + 5 s.
 
 Response:
 ```text
-bucket_id, cursor_in, next_cursor, heartbeat: bool, dropped_count, events
+bucket_id, cursor_in, next_cursor, heartbeat: bool, dropped_count, events,
+wake_reason: "append"|"match"|"exit"|"timeout",
+timeout_clamped_to_ms: u64?   only when the request was cut to the ceiling,
+job_exit: { job_id, state, exit_code?, exit_reason? }?   when wake_reason = exit
 ```
 
-Contract: when `heartbeat = true`, `events` MUST be empty and
-`next_cursor == cursor_in`.
+Contract: when `wake_reason = timeout`, `heartbeat = true` and `events`
+is empty. An `any`-mode wake whose append the filters rejected also returns an
+empty `events` with `heartbeat = true` (`wake_reason = append`), as before.
+An older daemon omits `wake_reason`, which decodes as `timeout`.
 
 ### `bucket_summary`
 

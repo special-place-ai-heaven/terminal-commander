@@ -55,7 +55,9 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use terminal_commander_core::{BucketConfig, RecipeDefinition, RuleDefinition, RuleType, Severity};
+use terminal_commander_core::{
+    BucketConfig, RecipeDefinition, RuleDefinition, RuleType, Severity, WakeMode,
+};
 use terminal_commanderd::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
     BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
@@ -1401,7 +1403,7 @@ impl TerminalCommanderMcpServer {
     /// bucket_wait (bounded) -> command_status so the agent needs ONE
     /// call instead of four.
     #[tool(
-        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | abandoned; a job whose end was never recorded comes back as a typed `JobLost` error instead) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING (elapsed_ms/last_output_age_ms show liveness); continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). pipeline_exit_masked:true means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only its last stage (unless the script sets pipefail). On Windows, piped children may show zero frames while still running (stdout buffering); pty_command_start avoids this. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected. Optional `limits` ({memory: \"24GiB\" or \"40%\", priority}) caps the job's memory; the reply reports limits_applied."
+        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | abandoned; a job whose end was never recorded comes back as a typed `JobLost` error instead) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000; the maximum is the daemon's `run_and_watch_max_wait_ms` from `policy_status`: 1 h under full_access, 60000 on a hardened profile) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING (elapsed_ms/last_output_age_ms show liveness); continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). pipeline_exit_masked:true means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only its last stage (unless the script sets pipefail). On Windows, piped children may show zero frames while still running (stdout buffering); pty_command_start avoids this. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected. Optional `limits` ({memory: \"24GiB\" or \"40%\", priority}) caps the job's memory; the reply reports limits_applied."
     )]
     async fn run_and_watch(
         &self,
@@ -1415,18 +1417,28 @@ impl TerminalCommanderMcpServer {
             .await?;
         let start_ipc = start_params.into_ipc()?;
         let credential_hint = password_prompt_hint(&start_ipc.argv);
-        let outcome = terminal_commander_ipc::compound::run_and_watch(
+        // The wait is honoured up to the daemon's ceiling (an older daemon
+        // does not report one and keeps the 60 s cap).
+        let ceiling_ms = match daemon.call(IpcRequest::PolicyStatus).await {
+            Ok(IpcResponse::PolicyStatus(p)) => p
+                .run_and_watch_max_wait_ms
+                .unwrap_or(RUN_AND_WATCH_MAX_WAIT_MS),
+            _ => RUN_AND_WATCH_MAX_WAIT_MS,
+        };
+        let outcome = terminal_commander_ipc::compound::run_and_watch_with_ceiling(
             start_ipc,
             terminal_commander_ipc::compound::RunAndWatchOptions {
                 wait_ms: controls.wait_ms,
                 max_signals: controls.max_signals,
                 wait_until_exit: controls.wait_until_exit,
             },
+            ceiling_ms,
             |request| daemon.call(request),
         )
         .await
         .map_err(|error| into_mcp_error_for_tool(false, &error, Some("run_and_watch")))?;
         let mut body = run_and_watch_outcome_value(&outcome, controls.compact);
+        body["wait_cap_ms"] = serde_json::json!(ceiling_ms);
         if !outcome.degraded {
             if let Some(hint) = credential_hint {
                 body["credential_hint"] = serde_json::json!(hint);
@@ -1573,7 +1585,7 @@ impl TerminalCommanderMcpServer {
 
     /// `bucket_wait` — realtime wait; returns heartbeat on timeout.
     #[tool(
-        description = "Realtime wait on a bucket. Returns a heartbeat when the timeout expires without matching events. `max_signals` carries forward the run_and_watch signal budget as a real output cap; when `limit` is also present, the stricter cap wins. Bounded by daemon caps."
+        description = "Realtime wait on a bucket. Returns a heartbeat (wake_reason=timeout) when the wait expires without matching events. `timeout_ms` is honoured as passed up to the daemon ceiling, which `policy_status` reports as `bucket_wait_max_ms` (1 h under the default full_access profile, 30 s on a hardened one); a longer request is cut to the ceiling and the response says so in `timeout_clamped_to_ms`. A harness must allow its own tool timeout of at least `timeout_ms` + 5 s. `wake_mode` is `any` (default: return on the first append, even one your filters reject) or `match` (keep waiting until an event passes `severity_min`/`kind_filter`, the job ends, or the wait expires): use `match` to wait out a chatty job in one call. When the watched job has ended the call returns at once with wake_reason=exit and `job_exit` {job_id, state, exit_code, exit_reason}, matched or not. `max_signals` carries forward the run_and_watch signal budget as a real output cap; when `limit` is also present, the stricter cap wins."
     )]
     async fn bucket_wait(
         &self,
@@ -5676,7 +5688,8 @@ const fn default_true_mcp() -> bool {
 /// widening tuple. All caps are server-side and honored to the wire (TC-E2).
 #[derive(Debug, Clone, Copy)]
 struct RunAndWatchControls {
-    /// Clamped wall-clock wait budget, in ms (TC-6 deadline source).
+    /// Wall-clock wait budget, in ms, clamped to the 1 h hard cap here and
+    /// to the daemon's `run_and_watch_max_wait_ms` before the wait starts.
     wait_ms: u64,
     /// Clamped max signals to return.
     max_signals: usize,
@@ -5784,7 +5797,7 @@ impl McpRunAndWatchParams {
         let wait_ms = self
             .wait_ms
             .unwrap_or(RUN_AND_WATCH_DEFAULT_WAIT_MS)
-            .min(RUN_AND_WATCH_MAX_WAIT_MS);
+            .min(terminal_commander_ipc::BUCKET_WAIT_HARD_CAP_MS);
         let max_signals = self
             .max_signals
             .unwrap_or(RUN_AND_WATCH_DEFAULT_MAX_SIGNALS)
@@ -5912,10 +5925,19 @@ pub struct McpBucketWaitParams {
     #[serde(default, deserialize_with = "de_opt_usize_lenient")]
     #[schemars(with = "usize")]
     pub max_signals: Option<usize>,
-    /// Wait timeout in milliseconds. Clamped at the daemon.
+    /// Wait timeout in milliseconds (default 5000), honoured as passed up to
+    /// the daemon ceiling `bucket_wait_max_ms` shown by `policy_status`;
+    /// above it the wait is cut to the ceiling and the response carries
+    /// `timeout_clamped_to_ms`.
     #[serde(default, deserialize_with = "de_opt_u64_lenient")]
     #[schemars(with = "u64")]
     pub timeout_ms: Option<u64>,
+    /// `any` (default) returns on the first append to the bucket, even one
+    /// the filters reject. `match` returns only when an event passes
+    /// `severity_min` / `kind_filter`, when the watched job ends, or on
+    /// timeout.
+    #[serde(default)]
+    pub wake_mode: Option<String>,
     /// When true, each returned signal is projected to the load-bearing field
     /// set `{summary, stream, seq, severity}` and the payload echoes
     /// `compact: true`. Presentation only: the full records stay re-fetchable
@@ -5939,6 +5961,16 @@ impl McpBucketWaitParams {
             (Some(limit), Some(max_signals)) => Some(limit.min(max_signals)),
             (limit, max_signals) => limit.or(max_signals),
         };
+        let wake_mode = match self.wake_mode.as_deref() {
+            None => None,
+            Some(m) if m.eq_ignore_ascii_case("any") => Some(WakeMode::Any),
+            Some(m) if m.eq_ignore_ascii_case("match") => Some(WakeMode::Match),
+            Some(other) => {
+                return Err(format!(
+                    "wake_mode must be \"any\" or \"match\", got \"{other}\""
+                ));
+            }
+        };
         Ok(BucketWaitParams {
             bucket_id,
             cursor: self.cursor,
@@ -5946,7 +5978,7 @@ impl McpBucketWaitParams {
             kind_filter: self.kind_filter,
             limit,
             timeout_ms: self.timeout_ms,
-            wake_mode: None,
+            wake_mode,
         })
     }
 }
@@ -6193,9 +6225,16 @@ fn bucket_wait_payload(r: &BucketWaitResponse, compact: bool) -> serde_json::Val
         "cursor_in": r.cursor_in,
         "next_cursor": r.next_cursor,
         "heartbeat": r.heartbeat,
+        "wake_reason": r.wake_reason,
         "dropped_count": r.dropped_count,
         "events": project_events(&r.events, compact),
     });
+    if let Some(ms) = r.timeout_clamped_to_ms {
+        payload["timeout_clamped_to_ms"] = serde_json::json!(ms);
+    }
+    if let Some(exit) = &r.job_exit {
+        payload["job_exit"] = serde_json::json!(exit);
+    }
     // FR-030: echo `compact:true` ONLY when set, so a full read stays
     // byte-identical to today's payload.
     if compact {

@@ -1136,8 +1136,8 @@ fn handle_policy_status(state: &Arc<DaemonState>) -> IpcResponse {
             allow_remote: caps.allow_remote,
         },
         llm_can_activate_recipes: state.policy.llm_can_activate_recipes(),
-        bucket_wait_max_ms: None,
-        run_and_watch_max_wait_ms: None,
+        bucket_wait_max_ms: Some(state.config.bucket_wait_ceiling_ms()),
+        run_and_watch_max_wait_ms: Some(state.config.run_and_watch_ceiling_ms()),
         governor: state.policy.governor_status(),
         config_warnings: state.config.warnings.clone(),
     })
