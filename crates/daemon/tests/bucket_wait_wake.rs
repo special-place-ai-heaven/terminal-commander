@@ -222,8 +222,9 @@ fn bucket_wait_default_mode_unchanged() {
         assert_eq!(w.timeout_clamped_to_ms, None);
         assert!(w.job_exit.is_none());
         // Timeout still reports a heartbeat with wake_reason timeout.
-        // From the advanced cursor: nothing new, so the wait times out.
+        // Same filter: the low event never matches, so the wait times out.
         let mut p = wait_params(bucket, 100);
+        p.severity_min = Some(Severity::High);
         p.cursor = w.next_cursor;
         let w = call_wait(&client, p).await;
         assert!(w.heartbeat);
