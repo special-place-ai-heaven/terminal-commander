@@ -262,7 +262,7 @@ of TC47 (items marked "Update 2026-10-05" have since changed):
 ## Doctrine snapshot (locked decisions, refreshed at TC48)
 
 - License: PolyForm-Noncommercial-1.0.0.
-- Rust toolchain: 1.99.1 active (rmcp =3.4.1; MSRV floor 1.92).
+- Rust toolchain: 1.99.1 active (rmcp =3.9.0; MSRV floor 1.92).
 - Storage: rusqlite 0.40.2 bundled + FTS5 (`crates/store/Cargo.toml`); manual migration runner
   (refinery 0.9 pinned rusqlite <=0.38; conflict resolved by
   manual runner — see TC12 commit message).

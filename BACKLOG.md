@@ -523,7 +523,7 @@ is not lost.
 |-------------------------|-------------|-------|
 | persistent audit writes | TC35        | `PersistentAudit` is the production audit path; the IPC server writes one audit row per accepted request. |
 | local UDS IPC           | TC37        | `IpcServer` binds `<data_dir>/terminal-commanderd.sock`; PeerCred records uid/gid/pid on connect; no network listener. |
-| rmcp stdio adapter      | TC40        | `terminal-commander-mcp` serves an rmcp 1.7.0 stdio adapter (now `rmcp =3.4.1`, workspace `Cargo.toml`) that forwards every tool call through the daemon UDS. |
+| rmcp stdio adapter      | TC40        | `terminal-commander-mcp` serves an rmcp 1.7.0 stdio adapter (now `rmcp =3.9.0`, workspace `Cargo.toml`) that forwards every tool call through the daemon UDS. |
 | PTY spawn               | TC44        | `pty-process = "=0.5.3"` drives the POSIX PTY spawn; secret-prompt boundary enforced via `IpcErrorCode::SecretInputDenied`. |
 | MCP command + bucket    | TC41        | `command_start_combed`, `bucket_events_since`, `bucket_wait`, `bucket_summary`, `command_status` all live through MCP. |
 | File read/search/watch  | TC43        | `file_read_window`, `file_search`, `file_watch_start/stop/list` all live and bounded. |

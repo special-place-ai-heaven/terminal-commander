@@ -3711,7 +3711,7 @@ and their argv_template. Use a native shell route with exec, shell=route.executa
 //     router the macro used (`ToolCallContext` + `self.tool_router.call`).
 //   - `get_tool` mirrors the macro (router lookup).
 //
-// rmcp 3.4.1 (SEP-2322): manual `call_tool` returns `CallToolResponse`.
+// rmcp 3.9.0 (SEP-2322): manual `call_tool` returns `CallToolResponse`.
 // Each `#[tool]` method still returns `CallToolResult`; the router wraps a
 // complete result with `.into()`. This handler re-wraps `Complete` the same
 // way so the manual return stays explicit.
@@ -6782,7 +6782,7 @@ const ELICIT_ACK_MS: u64 = 30_000;
 /// same `credential_request` falls back to the daemon's native prompt or
 /// the CLI. `accepted` reports which, after the page is settled. After
 /// accept, once the owner's answer lands, `notifications/elicitation/complete`
-/// closes the client's waiting state (rmcp 3.4.1 has no typed form of it).
+/// closes the client's waiting state (rmcp 3.9.0 has no typed form of it).
 async fn follow_elicitation(
     daemon: crate::daemon_client::McpDaemonClient,
     peer: rmcp::service::Peer<RoleServer>,

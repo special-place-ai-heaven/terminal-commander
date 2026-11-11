@@ -165,7 +165,7 @@ update.
 - Language: Rust, edition 2024.
 - Async runtime: tokio (used by rmcp's `tokio = "1"` dep, per
   `docs/research/mcp-rust-sdk.md`).
-- MCP SDK: rmcp `=3.4.1` exact pin (was `=1.8.0` at TC01; see root
+- MCP SDK: rmcp `=3.9.0` exact pin (was `=1.8.0` at TC01; see root
   `Cargo.toml`). MSRV Rust 1.92.
 - Storage: rusqlite 0.40 with `bundled` feature (FTS5 included) +
   a manual migration runner (refinery is not linked) + WAL mode. See
@@ -201,7 +201,7 @@ under `crates/<short>/` in a flat workspace; package names use hyphens.
 | `crates/probes/` | `terminal-commander-probes` | Probe runners: process probe, file probe, PTY probe, directory probe, future journal/artifact probes. Owns notify integration and PTY bridging. |
 | `crates/store/` | `terminal-commander-store` | rusqlite persistence with a manual migration runner: event store, bucket cursors, rule and recipe registry, audit log. FTS5 search lane. |
 | `crates/daemon/` | `terminal-commanderd` | Long-running daemon binary. Owns bucket manager, context spool, policy engine, audit emitter, and the local API. |
-| `crates/mcp/` | `terminal-commander-mcp` | Thin MCP server adapter (rmcp 3.4.1 stdio). Forwards every tool call to the daemon over IPC. |
+| `crates/mcp/` | `terminal-commander-mcp` | Thin MCP server adapter (rmcp 3.9.0 stdio). Forwards every tool call to the daemon over IPC. |
 | `crates/cli/` | `terminal-commander-cli` | Operator CLI. Talks to the daemon. Subcommands per TC25 (status, doctor, rules, buckets, jobs, probes, policy, audit) plus later additions (recipes, session, credential, update-locks, subscription-stream, subscription-pull). |
 | `crates/ipc/` | `terminal-commander-ipc` | IPC request/response types, limits, and the daemon client shared by the adapter, CLI and daemon. |
 | `crates/supervisor/` | `terminal-commander-supervisor` | Daemon bring-up, pidfile, version-aware replace, per-session endpoints, and state/socket path resolution. |

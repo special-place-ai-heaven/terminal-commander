@@ -38,7 +38,7 @@ This document tells:
 | The local operator (human running TC) | Trusted | Owns the host; can read TC's audit log, edit config, restart the daemon. |
 | The LLM client over MCP | Semi-trusted | Authoring intent is unverified. May try (accidentally or via prompt injection) to run dangerous commands, read secrets, or exfiltrate output. `credential_request` keeps a password out of every TC surface on the assumption that TC is the model's only way to run programs; a harness that also gives the model a raw shell can pipe `terminal-commander credential provide`, which the audit row records as `cli-stdin` (a typed answer is `cli-tty`). |
 | A compromised probe child process | Untrusted | A process spawned by TC can be malicious or buggy. Its output is data, not commands. |
-| A remote network attacker | Out of scope | TC has no network-reachable listener. The MCP transport is local stdio (rmcp 3.4.1). The one TCP socket is the owner's password page for `credential_request`: bound to 127.0.0.1 only while a PTY password prompt is pending, single-use token, 300 s. The daemon overwrites its copy of the password best-effort (OS and browser copies are not wiped). A local HTTP-inspecting proxy or filter on 127.0.0.1 (for example AdGuard) can observe the loopback POST: that is the accepted trade-off of the URL channel; `terminal-commander credential provide` avoids it. |
+| A remote network attacker | Out of scope | TC has no network-reachable listener. The MCP transport is local stdio (rmcp 3.9.0). The one TCP socket is the owner's password page for `credential_request`: bound to 127.0.0.1 only while a PTY password prompt is pending, single-use token, 300 s. The daemon overwrites its copy of the password best-effort (OS and browser copies are not wiped). A local HTTP-inspecting proxy or filter on 127.0.0.1 (for example AdGuard) can observe the loopback POST: that is the accepted trade-off of the URL channel; `terminal-commander credential provide` avoids it. |
 | A privileged co-tenant on the host | Out of scope | TC does not defend against root or kernel attackers on the same host. |
 
 ### 2.2 Threats considered
@@ -70,7 +70,7 @@ The MVP threat model does NOT center on:
   roadmap, not an MVP guarantee.
 - Side-channel or timing attacks against the daemon.
 - Supply-chain compromise of upstream crates. Mitigated separately by
-  `cargo-deny`, `cargo-machete`, and the pinned `rmcp = "=3.4.1"`.
+  `cargo-deny`, `cargo-machete`, and the pinned `rmcp = "=3.9.0"`.
 
 ## 3. Trust boundaries
 
@@ -80,7 +80,7 @@ goal that adds behavior touching them.
 ```text
 +-------------------+      MCP stdio      +-------------------------+
 |  LLM client       | <-----------------> |  terminal-commander-mcp |
-| (Claude Code,     |  rmcp 3.4.1         |  thin adapter           |
+| (Claude Code,     |  rmcp 3.9.0         |  thin adapter           |
 |  Codex, Cline...) |                     |                         |
 +-------------------+                     +-------------------------+
                                                      |
