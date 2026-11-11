@@ -191,10 +191,7 @@ async fn connect(
     let server = TerminalCommanderMcpServer::new(daemon);
     let server_task =
         tokio::spawn(async move { server.serve(server_transport).await.expect("server serve") });
-    let client = client
-        .serve(client_transport)
-        .await
-        .expect("client serve");
+    let client = client.serve(client_transport).await.expect("client serve");
     // The server asks the client to elicit mid-call, which needs the stateful
     // initialize handshake (discover is stateless in rmcp >=3.5.1). Initialize
     // is answered at once, so joining the server task cannot hang.
