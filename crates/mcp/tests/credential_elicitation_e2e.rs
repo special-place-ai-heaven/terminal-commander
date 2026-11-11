@@ -19,7 +19,7 @@ use rmcp::model::{
     ElicitRequestParams, ElicitResult, ElicitationAction, Implementation,
 };
 use rmcp::service::{NotificationContext, RequestContext};
-use rmcp::{ClientHandler, ClientServiceExt, ErrorData as McpError, RoleClient, ServiceExt};
+use rmcp::{ClientHandler, ErrorData as McpError, RoleClient, ServiceExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use terminal_commander_mcp::daemon_client::McpDaemonClient;
