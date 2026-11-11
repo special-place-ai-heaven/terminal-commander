@@ -103,4 +103,4 @@ assert_is_empty = "allow"      # mirrors the workspace table; see root Cargo.tom
 tempfile = "3"
 # Fault injection only (a trigger that fails one recipe activation); the
 # store already locks this version.
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
