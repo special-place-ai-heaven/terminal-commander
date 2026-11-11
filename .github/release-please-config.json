@@ -17,9 +17,7 @@
         "terminal-commander",
         "@terminal-commander/linux-x64",
         "@terminal-commander/linux-arm64",
-        "@terminal-commander/windows-x64",
-        "@terminal-commander/mac-x64",
-        "@terminal-commander/mac-arm64"
+        "@terminal-commander/windows-x64"
       ]
     }
   ],
@@ -32,9 +30,7 @@
       "extra-files": [
         { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/linux-x64']" },
         { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/linux-arm64']" },
-        { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/windows-x64']" },
-        { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/mac-x64']" },
-        { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/mac-arm64']" }
+        { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/windows-x64']" }
       ]
     },
     "packages/terminal-commander-linux-x64": {
@@ -55,20 +51,6 @@
       "release-type": "node",
       "component": "@terminal-commander/windows-x64",
       "package-name": "@terminal-commander/windows-x64",
-      "changelog-path": "CHANGELOG.md",
-      "extra-files": []
-    },
-    "packages/terminal-commander-mac-x64": {
-      "release-type": "node",
-      "component": "@terminal-commander/mac-x64",
-      "package-name": "@terminal-commander/mac-x64",
-      "changelog-path": "CHANGELOG.md",
-      "extra-files": []
-    },
-    "packages/terminal-commander-mac-arm64": {
-      "release-type": "node",
-      "component": "@terminal-commander/mac-arm64",
-      "package-name": "@terminal-commander/mac-arm64",
       "changelog-path": "CHANGELOG.md",
       "extra-files": []
     }

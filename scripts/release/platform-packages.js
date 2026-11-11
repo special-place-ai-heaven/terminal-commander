@@ -7,8 +7,6 @@ const PLATFORM_PACKAGES = Object.freeze([
   "@terminal-commander/linux-x64",
   "@terminal-commander/linux-arm64",
   "@terminal-commander/windows-x64",
-  "@terminal-commander/mac-x64",
-  "@terminal-commander/mac-arm64",
 ]);
 
 module.exports = { PLATFORM_PACKAGES };

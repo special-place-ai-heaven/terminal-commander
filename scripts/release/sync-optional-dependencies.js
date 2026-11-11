@@ -3,9 +3,9 @@
  * Keep the npm package graph pinned to the root package.json version.
  *
  * release-please updates the root package first. This script is run by
- * release-pr-sync on the release PR branch before auto-merge so the five
- * platform package package.json files, root optionalDependencies, and
- * release-please manifest entries stay in lockstep.
+ * release-pr-sync on the release PR branch before auto-merge so the
+ * Linux and Windows platform package.json files, root optionalDependencies,
+ * and release-please manifest entries stay in lockstep.
  */
 "use strict";
 
@@ -38,6 +38,13 @@ if (!version) {
 pkg.optionalDependencies = pkg.optionalDependencies || {};
 
 let changed = false;
+for (const name of Object.keys(pkg.optionalDependencies)) {
+  if (!PLATFORM_PACKAGES.includes(name)) {
+    delete pkg.optionalDependencies[name];
+    changed = true;
+  }
+}
+
 for (const name of PLATFORM_PACKAGES) {
   if (pkg.optionalDependencies[name] !== version) {
     pkg.optionalDependencies[name] = version;

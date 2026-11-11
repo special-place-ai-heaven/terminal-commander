@@ -1,7 +1,7 @@
 {
   "name": "terminal-commander",
-  "version": "0.3.17",
-  "description": "Terminal Commander: local MCP-operated terminal/file signal channel with native Linux, Windows, and macOS packages.",
+  "version": "0.3.18",
+  "description": "Terminal Commander: local MCP-operated terminal/file signal channel with native Linux and Windows packages.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "author": "special-place-ai-heaven",
   "repository": {
@@ -35,11 +35,9 @@
     "LICENSE"
   ],
   "optionalDependencies": {
-    "@terminal-commander/linux-x64": "0.3.17",
-    "@terminal-commander/linux-arm64": "0.3.17",
-    "@terminal-commander/windows-x64": "0.3.17",
-    "@terminal-commander/mac-x64": "0.3.17",
-    "@terminal-commander/mac-arm64": "0.3.17"
+    "@terminal-commander/linux-x64": "0.3.18",
+    "@terminal-commander/linux-arm64": "0.3.18",
+    "@terminal-commander/windows-x64": "0.3.18"
   },
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
@@ -51,7 +49,6 @@
   },
   "os": [
     "linux",
-    "win32",
-    "darwin"
+    "win32"
   ]
 }

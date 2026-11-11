@@ -6,13 +6,11 @@
 # NPM06 portion:
 #   On every push to `main`, run release-please in manifest mode so
 #   Conventional Commits drive a single shared-version release PR
-#   across the six npm packages:
+#   across the four npm packages:
 #     - packages/terminal-commander           (root wrapper)
 #     - packages/terminal-commander-linux-x64 (@terminal-commander/linux-x64)
 #     - packages/terminal-commander-linux-arm64 (@terminal-commander/linux-arm64)
 #     - packages/terminal-commander-windows-x64 (@terminal-commander/windows-x64)
-#     - packages/terminal-commander-mac-x64 (@terminal-commander/mac-x64)
-#     - packages/terminal-commander-mac-arm64 (@terminal-commander/mac-arm64)
 #
 #   The release PR carries the version bump on each `package.json`
 #   plus a CHANGELOG entry. When (and only when) the operator merges
@@ -25,11 +23,11 @@
 #   ensure-release, and force-publish entry paths. `prepublish-gate`
 #   then runs all wrapper/config/version checks before any registry write.
 #   When that gate succeeds, the downstream publish chain runs:
-#     - build-<platform> + publish-<platform> for all 5 targets
-#       (linux-x64, linux-arm64, windows-x64, mac-x64, mac-arm64):
+#     - build-<platform> + publish-<platform> for all 3 targets
+#       (linux-x64, linux-arm64, windows-x64; no macOS since 2026-11-08):
 #       each builds the platform binaries and `npm publish`es
 #       `@terminal-commander/<platform>` (dist-tag latest).
-#     - publish-root: depends on all 5 platform publishes; `npm publish`
+#     - publish-root: depends on all 3 platform publishes; `npm publish`
 #       for the `terminal-commander` root wrapper (latest).
 #     - then the crates.io cargo-publish chain (see below).
 #   npm publish uses OIDC TRUSTED PUBLISHING + `--provenance` (Task 23,
@@ -406,8 +404,7 @@ jobs:
   # ----------------------------------------------------------------
   # PLATFORM JOBS — build + publish (NPM07).
   #
-  # For each of the 5 platforms (linux-x64, linux-arm64, windows-x64,
-  # mac-x64, mac-arm64) there is a pair of jobs:
+  # For each of the 3 platforms (linux-x64, linux-arm64, windows-x64) there is a pair of jobs:
   #
   #   build-<platform>   — calls reusable `_build-platform-binary.yml`
   #                        which compiles the 3 Rust binaries on the
@@ -448,6 +445,7 @@ jobs:
     with:
       platform: linux-x64
       upload_artifact: true
+      hosted_only: true
 
   presmoke-linux-x64:
     name: presmoke-linux-x64
@@ -791,180 +789,10 @@ jobs:
           fi
           exit 1
 
-  # ---------- mac-x64 ----------
-  build-mac-x64:
-    needs:
-      - release-context
-      - prepublish-gate
-    if: >-
-      always() && !cancelled() &&
-      needs.release-context.outputs.publish == 'true' &&
-      needs.prepublish-gate.result == 'success'
-    uses: ./.github/workflows/_build-platform-binary.yml
-    with:
-      platform: mac-x64
-      upload_artifact: true
-
-  publish-mac-x64:
-    name: publish-mac-x64
-    needs:
-      - release-context
-      - build-mac-x64
-    if: >-
-      always() && !cancelled() &&
-      needs.build-mac-x64.result == 'success' &&
-      needs.release-context.outputs.publish == 'true'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      # Task 23: OIDC trusted publishing. Scoped to publish jobs only.
-      id-token: write
-    steps:
-      - name: Checkout (released SHA on main)
-        uses: actions/checkout@v7
-
-      - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
-        uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_PUBLISH_VERSION }}
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Download bin.tar artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: tc-bin-mac-x64
-          path: packages/terminal-commander-mac-x64/
-
-      - name: Extract bin.tar (preserves +x mode)
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd packages/terminal-commander-mac-x64
-          rm -rf bin
-          tar -xf bin.tar
-          rm bin.tar
-          ls -la bin/
-
-      - name: Confirm package version matches release-please output
-        shell: bash
-        env:
-          EXPECTED_VERSION: ${{ needs.release-context.outputs.version }}
-        run: |
-          set -e
-          actual=$(node -p "require('./packages/terminal-commander-mac-x64/package.json').version")
-          if [ "$actual" != "$EXPECTED_VERSION" ]; then
-            echo "::error::version mismatch: package.json=$actual release-please=$EXPECTED_VERSION"
-            exit 1
-          fi
-          echo "version-match: $actual"
-
-      - name: npm publish (OIDC trusted publishing + provenance)
-        shell: bash
-        working-directory: packages/terminal-commander-mac-x64
-        run: |
-          set -e
-          if npm publish --access public --provenance; then
-            exit 0
-          fi
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
-            ver=$(node -p "require('./package.json').version")
-            name=$(node -p "require('./package.json').name")
-            if npm view "${name}@${ver}" version >/dev/null 2>&1; then
-              echo "::warning::${name}@${ver} already on registry (force_publish recovery)"
-              exit 0
-            fi
-          fi
-          exit 1
-
-  # ---------- mac-arm64 ----------
-  build-mac-arm64:
-    needs:
-      - release-context
-      - prepublish-gate
-    if: >-
-      always() && !cancelled() &&
-      needs.release-context.outputs.publish == 'true' &&
-      needs.prepublish-gate.result == 'success'
-    uses: ./.github/workflows/_build-platform-binary.yml
-    with:
-      platform: mac-arm64
-      upload_artifact: true
-
-  publish-mac-arm64:
-    name: publish-mac-arm64
-    needs:
-      - release-context
-      - build-mac-arm64
-    if: >-
-      always() && !cancelled() &&
-      needs.build-mac-arm64.result == 'success' &&
-      needs.release-context.outputs.publish == 'true'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      # Task 23: OIDC trusted publishing. Scoped to publish jobs only.
-      id-token: write
-    steps:
-      - name: Checkout (released SHA on main)
-        uses: actions/checkout@v7
-
-      - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
-        uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_PUBLISH_VERSION }}
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Download bin.tar artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: tc-bin-mac-arm64
-          path: packages/terminal-commander-mac-arm64/
-
-      - name: Extract bin.tar (preserves +x mode)
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd packages/terminal-commander-mac-arm64
-          rm -rf bin
-          tar -xf bin.tar
-          rm bin.tar
-          ls -la bin/
-
-      - name: Confirm package version matches release-please output
-        shell: bash
-        env:
-          EXPECTED_VERSION: ${{ needs.release-context.outputs.version }}
-        run: |
-          set -e
-          actual=$(node -p "require('./packages/terminal-commander-mac-arm64/package.json').version")
-          if [ "$actual" != "$EXPECTED_VERSION" ]; then
-            echo "::error::version mismatch: package.json=$actual release-please=$EXPECTED_VERSION"
-            exit 1
-          fi
-          echo "version-match: $actual"
-
-      - name: npm publish (OIDC trusted publishing + provenance)
-        shell: bash
-        working-directory: packages/terminal-commander-mac-arm64
-        run: |
-          set -e
-          if npm publish --access public --provenance; then
-            exit 0
-          fi
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
-            ver=$(node -p "require('./package.json').version")
-            name=$(node -p "require('./package.json').name")
-            if npm view "${name}@${ver}" version >/dev/null 2>&1; then
-              echo "::warning::${name}@${ver} already on registry (force_publish recovery)"
-              exit 0
-            fi
-          fi
-          exit 1
-
   # ----------------------------------------------------------------
   # ROOT PACKAGE — publish-root (NPM07).
   #
-  # Depends on ALL 5 platform publishes succeeding. Only then does the
+  # Depends on ALL 3 platform publishes succeeding. Only then does the
   # root wrapper publish; its `optionalDependencies` pin the exact
   # platform-package versions, so publishing the root before the
   # platform packages would resolve to a non-existent dep.
@@ -983,16 +811,12 @@ jobs:
       - publish-linux-x64
       - publish-linux-arm64
       - publish-windows-x64
-      - publish-mac-x64
-      - publish-mac-arm64
     if: >-
       always() && !cancelled() &&
       needs.release-context.outputs.publish == 'true' &&
       needs.publish-linux-x64.result == 'success' &&
       needs.publish-linux-arm64.result == 'success' &&
-      needs.publish-windows-x64.result == 'success' &&
-      needs.publish-mac-x64.result == 'success' &&
-      needs.publish-mac-arm64.result == 'success'
+      needs.publish-windows-x64.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1437,7 +1261,7 @@ jobs:
         run: node scripts/release/publish-cargo-crate.js --crate terminal-commander-mcp --version "$EXPECTED"
 
   # ----------------------------------------------------------------
-  # JOB — post-publish smoke verification (5 platforms in parallel)
+  # JOB — post-publish smoke verification (3 platforms in parallel)
   # Each job installs the published package from registry on the
   # matching native OS and confirms the MCP binary works. If any
   # fail, mark-release-broken auto-opens a P0 issue.
@@ -1630,91 +1454,6 @@ jobs:
             Start-Sleep -Seconds 2
           }
 
-  verify-mac-x64:
-    name: verify-mac-x64
-    needs: [release-context, publish-root]
-    if: always() && needs.publish-root.result == 'success'
-    runs-on: macos-15-intel   # Intel — macos-13 retired 2025-12-04; macos-15-intel is the supported Intel image. Keep a runner pinning task in runbook to rotate when GitHub deprecates.
-    timeout-minutes: 30 # registry wait can take 2 x 10 min; a hung step must not hold the release queue
-    permissions: { contents: read, issues: write }
-    steps:
-      - uses: actions/checkout@v7
-      - name: Wait for npm registry propagation
-        shell: bash
-        env:
-          VER: ${{ needs.release-context.outputs.version }}
-        run: bash scripts/release/wait-for-npm-registry.sh "terminal-commander@${VER}" "@terminal-commander/mac-x64@${VER}"
-      - uses: actions/setup-node@v7
-        with: { node-version: "20" }     # 0.2.0 ships without --provenance; Node 20 is fine. Task 23 bumps to 22.14+.
-      - env:
-          VER: ${{ needs.release-context.outputs.version }}
-        run: |
-          set -e
-          npm install -g "terminal-commander@${VER}"
-          terminal-commander-mcp --version
-          # Portable timeout via python (always on macOS runner). subprocess.run
-          # cleanly terminates the child + reports an explicit timeout, no
-          # SIGKILL race, no kill-wait hang. Exit 124 is the conventional
-          # "timed out cleanly" code we treat as success for an unbounded
-          # stdio server probe.
-          python3 - "$@" <<'PY'
-          import os, subprocess, sys
-          payload = os.environ["MCP_DISCOVER"]
-          try:
-              r = subprocess.run(
-                  ["terminal-commander-mcp"],
-                  input=payload, text=True, capture_output=True, timeout=10,
-              )
-              print(r.stdout)
-              if r.returncode == 0 and "supportedVersions" not in r.stdout:
-                  sys.exit("smoke: stdio probe got no server/discover result")
-              sys.exit(r.returncode)
-          except subprocess.TimeoutExpired:
-              print("smoke: stdio probe timed out (expected for unbounded server)")
-              sys.exit(0)
-          PY
-          echo 'verify-mac-x64: OK'
-
-  verify-mac-arm64:
-    name: verify-mac-arm64
-    needs: [release-context, publish-root]
-    if: always() && needs.publish-root.result == 'success'
-    runs-on: macos-14   # Apple Silicon
-    timeout-minutes: 30 # registry wait can take 2 x 10 min; a hung step must not hold the release queue
-    permissions: { contents: read, issues: write }
-    steps:
-      - uses: actions/checkout@v7
-      - name: Wait for npm registry propagation
-        shell: bash
-        env:
-          VER: ${{ needs.release-context.outputs.version }}
-        run: bash scripts/release/wait-for-npm-registry.sh "terminal-commander@${VER}" "@terminal-commander/mac-arm64@${VER}"
-      - uses: actions/setup-node@v7
-        with: { node-version: "20" }
-      - env:
-          VER: ${{ needs.release-context.outputs.version }}
-        run: |
-          set -e
-          npm install -g "terminal-commander@${VER}"
-          terminal-commander-mcp --version
-          python3 - "$@" <<'PY'
-          import os, subprocess, sys
-          payload = os.environ["MCP_DISCOVER"]
-          try:
-              r = subprocess.run(
-                  ["terminal-commander-mcp"],
-                  input=payload, text=True, capture_output=True, timeout=10,
-              )
-              print(r.stdout)
-              if r.returncode == 0 and "supportedVersions" not in r.stdout:
-                  sys.exit("smoke: stdio probe got no server/discover result")
-              sys.exit(r.returncode)
-          except subprocess.TimeoutExpired:
-              print("smoke: stdio probe timed out (expected for unbounded server)")
-              sys.exit(0)
-          PY
-          echo 'verify-mac-arm64: OK'
-
   # A publish-intended run is complete only when every required job succeeded.
   # This converts silent skip propagation into an explicit workflow failure.
   release-verdict:
@@ -1730,10 +1469,6 @@ jobs:
       - publish-linux-arm64
       - build-windows-x64
       - publish-windows-x64
-      - build-mac-x64
-      - publish-mac-x64
-      - build-mac-arm64
-      - publish-mac-arm64
       - publish-root
       - publish-cargo-terminal-commander-core
       - publish-cargo-terminal-commander-sifters
@@ -1746,8 +1481,6 @@ jobs:
       - verify-linux-x64
       - verify-linux-arm64
       - verify-windows-x64
-      - verify-mac-x64
-      - verify-mac-arm64
     if: always() && !cancelled()
     runs-on: ubuntu-24.04
     permissions:
@@ -1773,8 +1506,6 @@ jobs:
       - publish-linux-x64
       - publish-linux-arm64
       - publish-windows-x64
-      - publish-mac-x64
-      - publish-mac-arm64
       - publish-root
       - publish-cargo-terminal-commander-core
       - publish-cargo-terminal-commander-sifters
@@ -1787,8 +1518,6 @@ jobs:
       - verify-linux-x64
       - verify-linux-arm64
       - verify-windows-x64
-      - verify-mac-x64
-      - verify-mac-arm64
     if: |
       always() && !cancelled() &&
       (needs.release-verdict.result == 'failure' ||
@@ -1797,8 +1526,6 @@ jobs:
        needs.publish-linux-x64.result == 'failure' ||
        needs.publish-linux-arm64.result == 'failure' ||
        needs.publish-windows-x64.result == 'failure' ||
-       needs.publish-mac-x64.result == 'failure' ||
-       needs.publish-mac-arm64.result == 'failure' ||
        needs.publish-root.result == 'failure' ||
        needs.publish-cargo-terminal-commander-core.result == 'failure' ||
        needs.publish-cargo-terminal-commander-sifters.result == 'failure' ||
@@ -1810,9 +1537,7 @@ jobs:
        needs.publish-cargo-terminal-commander-mcp.result == 'failure' ||
        needs.verify-linux-x64.result == 'failure' ||
        needs.verify-linux-arm64.result == 'failure' ||
-       needs.verify-windows-x64.result == 'failure' ||
-       needs.verify-mac-x64.result == 'failure' ||
-       needs.verify-mac-arm64.result == 'failure')
+       needs.verify-windows-x64.result == 'failure')
     runs-on: ubuntu-24.04
     permissions: { issues: write, contents: read }
     steps:
@@ -1827,8 +1552,6 @@ jobs:
           PUB_LX64: ${{ needs.publish-linux-x64.result }}
           PUB_LARM: ${{ needs.publish-linux-arm64.result }}
           PUB_WIN:  ${{ needs.publish-windows-x64.result }}
-          PUB_MX64: ${{ needs.publish-mac-x64.result }}
-          PUB_MARM: ${{ needs.publish-mac-arm64.result }}
           PUB_ROOT: ${{ needs.publish-root.result }}
           PUB_CORE: ${{ needs.publish-cargo-terminal-commander-core.result }}
           PUB_SIFTERS: ${{ needs.publish-cargo-terminal-commander-sifters.result }}
@@ -1842,8 +1565,6 @@ jobs:
           RES_LX64: ${{ needs.verify-linux-x64.result }}
           RES_LARM: ${{ needs.verify-linux-arm64.result }}
           RES_WIN:  ${{ needs.verify-windows-x64.result }}
-          RES_MX64: ${{ needs.verify-mac-x64.result }}
-          RES_MARM: ${{ needs.verify-mac-arm64.result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -e
@@ -1864,8 +1585,6 @@ jobs:
           printf -- '- linux-x64   : %s\n' "$PUB_LX64"  >> /tmp/body.md
           printf -- '- linux-arm64 : %s\n' "$PUB_LARM"  >> /tmp/body.md
           printf -- '- windows-x64 : %s\n' "$PUB_WIN"   >> /tmp/body.md
-          printf -- '- mac-x64     : %s\n' "$PUB_MX64"  >> /tmp/body.md
-          printf -- '- mac-arm64   : %s\n' "$PUB_MARM"  >> /tmp/body.md
           printf -- '- root        : %s\n\n' "$PUB_ROOT" >> /tmp/body.md
           printf -- 'Cargo publish:\n' >> /tmp/body.md
           printf -- '- core        : %s\n' "$PUB_CORE" >> /tmp/body.md
@@ -1880,8 +1599,6 @@ jobs:
           printf -- '- linux-x64   : %s\n' "$RES_LX64"  >> /tmp/body.md
           printf -- '- linux-arm64 : %s\n' "$RES_LARM"  >> /tmp/body.md
           printf -- '- windows-x64 : %s\n' "$RES_WIN"   >> /tmp/body.md
-          printf -- '- mac-x64     : %s\n' "$RES_MX64"  >> /tmp/body.md
-          printf -- '- mac-arm64   : %s\n\n' "$RES_MARM" >> /tmp/body.md
           printf -- '**Action required:**\n' >> /tmp/body.md
           if [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
             printf -- '1. Run `bash scripts/release/recover-partial-publish.sh %s` to identify missing artifacts.\n' "$VER" >> /tmp/body.md

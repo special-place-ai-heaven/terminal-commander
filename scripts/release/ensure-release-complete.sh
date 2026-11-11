@@ -14,7 +14,7 @@ root_pkg="packages/terminal-commander/package.json"
 # release-pr-sync.yml (sync-optional-dependencies.js + sync-cargo-versions.py)
 # on the release PR. If that sync is ever SKIPPED (e.g. the workflow was
 # temporarily disabled, or a pull_request event was missed) the release PR can
-# merge with root bumped but the 5 platform packages / manifest / Cargo still on
+# merge with root bumped but the platform packages / manifest / Cargo still on
 # the OLD version. That split previously killed this script (silent exit 2) and
 # left the release with no tag. Self-heal it here: the root package.json is the
 # version release-please bumps first and is the source of truth.
@@ -24,8 +24,6 @@ synced_paths=(
   packages/terminal-commander-linux-x64/package.json
   packages/terminal-commander-linux-arm64/package.json
   packages/terminal-commander-windows-x64/package.json
-  packages/terminal-commander-mac-x64/package.json
-  packages/terminal-commander-mac-arm64/package.json
   Cargo.toml
   Cargo.lock
   crates/daemon/Cargo.toml
@@ -93,14 +91,10 @@ if [ "$version" != "$root_ver" ]; then
   exit 1
 fi
 
-# Verify ALL 5 platform packages share the manifest version, not just the 2 linux ones.
-# Codex review I3 (2026-05-25): the prior 2-platform check let drift slip through on
-# windows-x64 + mac-x64 + mac-arm64.
+# Every released platform package must share the manifest version.
 for pkg in packages/terminal-commander-linux-x64/package.json \
            packages/terminal-commander-linux-arm64/package.json \
-           packages/terminal-commander-windows-x64/package.json \
-           packages/terminal-commander-mac-x64/package.json \
-           packages/terminal-commander-mac-arm64/package.json; do
+           packages/terminal-commander-windows-x64/package.json; do
   pv="$(node -p "require('./${pkg}').version")"
   if [ "$pv" != "$version" ]; then
     echo "::error::${pkg} version ${pv} != manifest ${version}"

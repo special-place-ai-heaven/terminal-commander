@@ -12,6 +12,7 @@ const {
 } = require("../../../scripts/release/resolve-release-context.js");
 const {
   validateReleaseInputs,
+  PACKAGE_DIRS,
 } = require("../../../scripts/release/validate-release-inputs.js");
 const {
   verifyReleaseResults,
@@ -122,18 +123,31 @@ test("release verdict distinguishes no-release, complete, and silently skipped r
     { status: "no_release", checkedJobs: 0 },
   );
 
+  assert.equal(EXPECTED_RELEASE_JOBS.some((name) => name.includes("mac")), false);
+
   const complete = {
     "release-context": { result: "success", outputs: { publish: "true" } },
   };
   for (const name of EXPECTED_RELEASE_JOBS) complete[name] = { result: "success" };
+  assert.equal("build-mac-x64" in complete, false);
+  assert.equal("verify-mac-arm64" in complete, false);
   assert.deepEqual(verifyReleaseResults(complete), {
     status: "complete",
     checkedJobs: EXPECTED_RELEASE_JOBS.length,
   });
 
-  complete["prepublish-gate"] = { result: "skipped" };
+  for (const name of EXPECTED_RELEASE_JOBS) {
+    const missing = { ...complete };
+    delete missing[name];
+    assert.throws(() => verifyReleaseResults(missing), new RegExp(`${name}=missing`));
+    assert.throws(
+      () => verifyReleaseResults({ ...complete, [name]: { result: "failure" } }),
+      new RegExp(`${name}=failure`),
+    );
+  }
+
   assert.throws(
-    () => verifyReleaseResults(complete),
+    () => verifyReleaseResults({ ...complete, "prepublish-gate": { result: "skipped" } }),
     /prepublish-gate=skipped/,
   );
 });
@@ -141,7 +155,8 @@ test("release verdict distinguishes no-release, complete, and silently skipped r
 test("all committed release version anchors agree", () => {
   const version = require("../package.json").version;
   const result = validateReleaseInputs(repoRoot, version);
-  assert.ok(result.checkedVersions >= 15);
+  assert.equal(PACKAGE_DIRS.some((dir) => dir.includes("-mac-")), false);
+  assert.equal(result.checkedVersions, PACKAGE_DIRS.length * 2 + 3);
   assert.throws(
     () => validateReleaseInputs(repoRoot, "9.9.9"),
     /release version mismatch/,

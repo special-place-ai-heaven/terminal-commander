@@ -17,8 +17,6 @@ NPM_PKGS=(
   "@terminal-commander/linux-x64"
   "@terminal-commander/linux-arm64"
   "@terminal-commander/windows-x64"
-  "@terminal-commander/mac-x64"
-  "@terminal-commander/mac-arm64"
 )
 
 CARGO_CRATES=(
