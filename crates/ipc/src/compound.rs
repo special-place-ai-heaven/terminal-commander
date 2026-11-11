@@ -163,6 +163,19 @@ where
                 collect_wait(call(request).await, &mut outcome, &mut cursor, max_signals)
             {
                 outcome.error = Some(error);
+                break;
+            }
+            // The status above predates the last slice: refresh it so the
+            // reported state and elapsed time are those at the deadline, and
+            // a job that ended during the final slice is reported complete.
+            match call(IpcRequest::CommandStatus(crate::CommandStatusParams {
+                job_id: outcome.start.job_id,
+            }))
+            .await
+            {
+                Ok(IpcResponse::CommandStatus(status)) => outcome.status = Some(status),
+                Ok(_) => outcome.error = Some(unexpected_response()),
+                Err(error) => outcome.error = Some(error),
             }
             break;
         }
