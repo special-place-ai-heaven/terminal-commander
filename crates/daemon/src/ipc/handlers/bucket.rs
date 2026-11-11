@@ -58,7 +58,9 @@ pub(in crate::ipc::server) async fn handle_bucket_wait(
         severity_min: params.severity_min,
         kind_filter: params.kind_filter.clone(),
         limit: Some(limit),
-        timeout: params.timeout(),
+        timeout: params.effective_timeout(state.config.bucket_wait_ceiling_ms()),
+        wake_mode: params.wake_mode.unwrap_or_default(),
+        exit_probe: None,
     };
     let resp = state
         .router
@@ -72,6 +74,9 @@ pub(in crate::ipc::server) async fn handle_bucket_wait(
         heartbeat: resp.heartbeat,
         dropped_count: resp.dropped_count,
         events: resp.events,
+        timeout_clamped_to_ms: None,
+        wake_reason: resp.wake_reason,
+        job_exit: None,
     }))
 }
 

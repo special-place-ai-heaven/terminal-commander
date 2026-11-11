@@ -1235,6 +1235,8 @@ impl TerminalCommanderMcpServer {
                 bucket_read_limit,
                 caps,
                 llm_can_activate_recipes,
+                bucket_wait_max_ms,
+                run_and_watch_max_wait_ms,
                 config_warnings,
                 governor,
             })) => json_tool_result(&serde_json::json!({
@@ -1244,6 +1246,10 @@ impl TerminalCommanderMcpServer {
                 "file_window_bytes": file_window_bytes,
                 "bucket_read_limit": bucket_read_limit,
                 "llm_can_activate_recipes": llm_can_activate_recipes,
+                // Longest waits the daemon honours (an older daemon omits
+                // them and clamps at 30 s / 60 s).
+                "bucket_wait_max_ms": bucket_wait_max_ms.unwrap_or(30_000),
+                "run_and_watch_max_wait_ms": run_and_watch_max_wait_ms.unwrap_or(60_000),
                 // Resolved per-call caps (POLICY.md section 4.1). Surfacing the
                 // active set keeps `full_access` and explicit `[policy.caps]`
                 // grants visible -- there is no opaque "full_access magic".
@@ -2513,6 +2519,7 @@ impl TerminalCommanderMcpServer {
                 kind_filter: None,
                 limit: Some(max_signals.saturating_sub(signals.len()).max(1)),
                 timeout_ms: Some(timeout_ms),
+                wake_mode: None,
             }))
             .await
         {
@@ -5939,6 +5946,7 @@ impl McpBucketWaitParams {
             kind_filter: self.kind_filter,
             limit,
             timeout_ms: self.timeout_ms,
+            wake_mode: None,
         })
     }
 }

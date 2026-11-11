@@ -302,6 +302,7 @@ const SPAWN_ACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(12)
 /// deadline does not make a timed-out start safe to re-send.
 fn blocking_deadline(request: &IpcRequest) -> Option<std::time::Duration> {
     match request {
+        #[allow(deprecated)]
         IpcRequest::BucketWait(p) => Some(p.timeout() + BLOCKING_DEADLINE_MARGIN),
         IpcRequest::ShellSessionExec(p) => p.wait_ms.map(|ms| {
             std::time::Duration::from_millis(ms.min(MAX_BUCKET_WAIT_MS)) + BLOCKING_DEADLINE_MARGIN
@@ -653,6 +654,7 @@ mod tests {
             kind_filter: None,
             limit: None,
             timeout_ms: Some(55_000),
+            wake_mode: None,
         };
         let d = blocking_deadline(&IpcRequest::BucketWait(p)).expect("bucket_wait blocks");
         assert_eq!(

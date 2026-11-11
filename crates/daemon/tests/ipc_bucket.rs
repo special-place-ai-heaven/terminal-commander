@@ -208,6 +208,7 @@ fn bucket_wait_returns_heartbeat_when_no_events_arrive() {
                     kind_filter: None,
                     limit: None,
                     timeout_ms: Some(100),
+                    wake_mode: None,
                 }),
             )
             .await
@@ -253,6 +254,7 @@ fn bucket_wait_wakes_on_command_event() {
                         kind_filter: None,
                         limit: None,
                         timeout_ms: Some(3_000),
+                        wake_mode: None,
                     }),
                 )
                 .await
@@ -958,6 +960,7 @@ fn ipc_bucket_methods_emit_persistent_audit_rows() {
                     kind_filter: None,
                     limit: None,
                     timeout_ms: Some(50),
+                    wake_mode: None,
                 }),
             )
             .await

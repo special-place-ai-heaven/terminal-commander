@@ -188,6 +188,7 @@ fn wait_request(
         kind_filter: None,
         limit: Some(max_signals.saturating_sub(outcome.signals.len()).max(1)),
         timeout_ms: Some(timeout_ms),
+        wake_mode: None,
     })
 }
 

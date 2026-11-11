@@ -202,6 +202,8 @@ pub(in crate::ipc::server) async fn handle_shell_session_exec(
         kind_filter: None,
         limit: Some(DEFAULT_BUCKET_READ_LIMIT),
         timeout: std::time::Duration::from_millis(wait_ms),
+        wake_mode: terminal_commander_core::WakeMode::Any,
+        exit_probe: None,
     };
     let resp = state
         .router

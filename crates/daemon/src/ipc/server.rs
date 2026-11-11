@@ -1136,6 +1136,8 @@ fn handle_policy_status(state: &Arc<DaemonState>) -> IpcResponse {
             allow_remote: caps.allow_remote,
         },
         llm_can_activate_recipes: state.policy.llm_can_activate_recipes(),
+        bucket_wait_max_ms: None,
+        run_and_watch_max_wait_ms: None,
         governor: state.policy.governor_status(),
         config_warnings: state.config.warnings.clone(),
     })
@@ -1488,6 +1490,7 @@ mod tests {
                 kind_filter: None,
                 limit: None,
                 timeout_ms: None,
+                wake_mode: None,
             }),
             IpcRequest::BucketSummary(BucketSummaryParams {
                 bucket_id: BucketId::new(),

@@ -415,6 +415,15 @@ pub struct LimitsSection {
     pub file_window_bytes: usize,
     #[serde(default = "default_read_limit")]
     pub bucket_read_limit: usize,
+    /// Longest `bucket_wait` honoured, in ms. Omitted: 3 600 000 under
+    /// `full_access` / `admin_debug`, 30 000 elsewhere. Clamped to
+    /// `BUCKET_WAIT_HARD_CAP_MS`; 0 is rejected. Independent of `[governor]`.
+    #[serde(default)]
+    pub bucket_wait_max_ms: Option<u64>,
+    /// Longest `run_and_watch` wait honoured, in ms. Omitted: 3 600 000
+    /// under `full_access` / `admin_debug`, 60 000 elsewhere. Same bounds.
+    #[serde(default)]
+    pub run_and_watch_max_wait_ms: Option<u64>,
 }
 
 const fn default_file_window_bytes() -> usize {
@@ -515,10 +524,24 @@ const fn default_limits() -> LimitsSection {
     LimitsSection {
         file_window_bytes: DEFAULT_FILE_WINDOW_BYTES,
         bucket_read_limit: DEFAULT_READ_LIMIT,
+        bucket_wait_max_ms: None,
+        run_and_watch_max_wait_ms: None,
     }
 }
 
 impl DaemonConfig {
+    /// Longest `bucket_wait` this daemon honours, in ms.
+    #[must_use]
+    pub fn bucket_wait_ceiling_ms(&self) -> u64 {
+        self.limits.bucket_wait_max_ms.unwrap_or(30_000)
+    }
+
+    /// Longest `run_and_watch` wait this daemon honours, in ms.
+    #[must_use]
+    pub fn run_and_watch_ceiling_ms(&self) -> u64 {
+        self.limits.run_and_watch_max_wait_ms.unwrap_or(60_000)
+    }
+
     /// Build a config with safe defaults rooted at the given data
     /// directory. Useful for tests and for first-run when no file
     /// exists.

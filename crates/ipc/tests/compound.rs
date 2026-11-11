@@ -64,6 +64,9 @@ const fn bucket(
         heartbeat: events.is_empty(),
         dropped_count: 0,
         events,
+        timeout_clamped_to_ms: None,
+        wake_reason: terminal_commander_core::BucketWakeReason::Timeout,
+        job_exit: None,
     })
 }
 

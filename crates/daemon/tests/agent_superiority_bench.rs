@@ -179,6 +179,7 @@ fn draft_inline_rule_is_skipped_not_fatal_to_command_start() {
                         kind_filter: None,
                         limit: None,
                         timeout_ms: Some(1_000),
+                        wake_mode: None,
                     }),
                 )
                 .await
@@ -304,6 +305,7 @@ fn tc_signal_cost_is_orders_of_magnitude_below_raw_shell_cost() {
                         kind_filter: None,
                         limit: None,
                         timeout_ms: Some(1_000),
+                        wake_mode: None,
                     }),
                 )
                 .await

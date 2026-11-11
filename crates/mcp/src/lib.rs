@@ -139,6 +139,8 @@ impl ToolSurface {
             kind_filter,
             limit,
             timeout,
+            wake_mode: terminal_commander_core::WakeMode::Any,
+            exit_probe: None,
         };
         Ok(self.router.bucket_wait(bucket_id, req).await?)
     }

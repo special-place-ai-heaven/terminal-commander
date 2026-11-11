@@ -31,6 +31,7 @@ use terminal_commander_core::{
     ActivationScope, BucketConfig, BucketId, EventId, JobId, RecipeDefinition, RecipeStatus,
     RuleDefinition, RuleStatus, SessionId, Severity, SignalEvent, SourceStream,
 };
+use terminal_commander_core::{BucketWakeReason, WakeMode};
 
 /// US2 (FR-011): a non-blocking hint that a curated rule pack exists
 /// for the tool being started but is not active. Surfaced on
@@ -419,6 +420,9 @@ pub struct ResponseEnvelope {
 pub const MAX_BUCKET_WAIT_MS: u64 = 30_000;
 /// Default wait timeout when the client omits one.
 pub const DEFAULT_BUCKET_WAIT_MS: u64 = 5_000;
+/// Absolute upper bound for the configurable `[limits] bucket_wait_max_ms`
+/// and `run_and_watch_max_wait_ms` ceilings (one hour).
+pub const BUCKET_WAIT_HARD_CAP_MS: u64 = 3_600_000;
 /// Hard cap on events returned by `bucket_events_since` /
 /// `bucket_wait`. Mirrors the codebase `MAX_READ_LIMIT`.
 pub const MAX_BUCKET_READ_LIMIT: usize = 10_000;
@@ -1133,6 +1137,14 @@ pub struct PolicyStatusResponse {
     /// where an MCP caller is denied with `recipe_activate_requires_admin`.
     #[serde(default)]
     pub llm_can_activate_recipes: bool,
+    /// Longest `bucket_wait` the daemon will honour, in ms. Omitted by older
+    /// daemons, which clamp at 30 000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_wait_max_ms: Option<u64>,
+    /// Longest `run_and_watch` wait the daemon will honour, in ms. Omitted
+    /// by older daemons, which clamp at 60 000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_and_watch_max_wait_ms: Option<u64>,
     /// `[governor]` resource-governor state. Omitted by older daemons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub governor: Option<GovernorStatus>,
@@ -1579,19 +1591,51 @@ pub struct BucketWaitParams {
     pub kind_filter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
-    /// Maximum wait in milliseconds. Clamped to `MAX_BUCKET_WAIT_MS`.
+    /// Maximum wait in milliseconds, honoured as passed up to the daemon's
+    /// `[limits] bucket_wait_max_ms` ceiling (see `policy_status`).
     /// Omitted = `DEFAULT_BUCKET_WAIT_MS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// `any` (default, today's behaviour) or `match`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_mode: Option<WakeMode>,
 }
 
 impl BucketWaitParams {
-    /// Resolve the effective `Duration`, clamping to the hard cap.
+    /// The wait the caller asked for, before any ceiling.
+    #[must_use]
+    pub fn requested_timeout(&self) -> Duration {
+        Duration::from_millis(self.timeout_ms.unwrap_or(DEFAULT_BUCKET_WAIT_MS))
+    }
+
+    /// The wait the daemon will honour: the request clamped to `ceiling_ms`.
+    #[must_use]
+    pub fn effective_timeout(&self, ceiling_ms: u64) -> Duration {
+        let _ = ceiling_ms;
+        self.requested_timeout()
+            .min(Duration::from_millis(MAX_BUCKET_WAIT_MS))
+    }
+
+    /// Resolve the effective `Duration`, clamping to the old 30 s constant.
+    #[deprecated(note = "use requested_timeout() and effective_timeout(ceiling)")]
     #[must_use]
     pub fn timeout(&self) -> Duration {
         let raw = self.timeout_ms.unwrap_or(DEFAULT_BUCKET_WAIT_MS);
         Duration::from_millis(raw.min(MAX_BUCKET_WAIT_MS))
     }
+}
+
+/// How a watched job ended, returned by `bucket_wait` when the bucket's
+/// job is no longer running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketJobExit {
+    pub job_id: JobId,
+    pub state: terminal_commander_core::JobState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Terminating signal or `CANCELLED`, when there was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_reason: Option<String>,
 }
 
 /// Response shape for `bucket_wait`. Identical to
@@ -1606,6 +1650,16 @@ pub struct BucketWaitResponse {
     pub heartbeat: bool,
     pub dropped_count: u64,
     pub events: Vec<SignalEvent>,
+    /// Set only when the requested `timeout_ms` exceeded the ceiling: the
+    /// ceiling that was applied instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_clamped_to_ms: Option<u64>,
+    /// Why the wait returned.
+    #[serde(default)]
+    pub wake_reason: BucketWakeReason,
+    /// Present when the bucket's job has ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_exit: Option<BucketJobExit>,
 }
 
 /// Parameters for `bucket_summary`.
@@ -4701,6 +4755,7 @@ mod tests {
                     kind_filter: None,
                     limit: None,
                     timeout_ms: None,
+                    wake_mode: None,
                 }),
                 true,
             ),
