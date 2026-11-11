@@ -78,7 +78,7 @@ fn start_job(state: &DaemonState, script: &str) -> terminal_commanderd::CommandS
         .unwrap()
 }
 
-fn wait_params(bucket_id: BucketId, timeout_ms: u64) -> BucketWaitParams {
+const fn wait_params(bucket_id: BucketId, timeout_ms: u64) -> BucketWaitParams {
     BucketWaitParams {
         bucket_id,
         cursor: 0,
