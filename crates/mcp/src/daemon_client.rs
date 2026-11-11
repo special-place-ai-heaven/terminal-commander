@@ -657,7 +657,10 @@ mod tests {
             wake_mode: None,
         };
         let d = blocking_deadline(&IpcRequest::BucketWait(p.clone())).expect("bucket_wait blocks");
-        assert_eq!(d, std::time::Duration::from_secs(55) + BLOCKING_DEADLINE_MARGIN);
+        assert_eq!(
+            d,
+            std::time::Duration::from_secs(55) + BLOCKING_DEADLINE_MARGIN
+        );
         // A 10-minute wait (the #284 case) is not cut at 30 s.
         let long = terminal_commander_ipc::BucketWaitParams {
             timeout_ms: Some(600_000),
