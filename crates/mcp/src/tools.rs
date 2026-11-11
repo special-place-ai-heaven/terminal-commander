@@ -3678,20 +3678,37 @@ For sticky-cwd sessions (unix-only; unavailable on Windows): sh_start (requires 
     pub(crate) async fn session_facade(
         &self,
         Parameters(call): Parameters<crate::facades::SessionFacadeCall>,
+        request_state: RequestState,
+        input_responses: ToolInputResponses,
         ctx: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         use crate::facades::SessionFacadeCall as S;
+        // `credential_request` can answer with an `InputRequiredResult`
+        // (SEP-2322), so the facade returns `CallToolResponse`; the other
+        // actions complete and are wrapped with `.into()`.
         match call {
-            S::PtyStart(p) => self.pty_command_start(Parameters(p)).await,
-            S::PtyStdin(p) => self.pty_command_write_stdin(Parameters(p)).await,
-            S::PtyStop(p) => self.pty_command_stop(Parameters(p)).await,
-            S::PtyList => self.pty_command_list().await,
-            S::CredentialRequest(p) => self.credential_request(Parameters(p), ctx).await,
-            S::ShStart(p) => self.shell_session_start(Parameters(p)).await,
-            S::ShExec(p) => self.shell_session_exec(Parameters(p)).await,
-            S::ShStatus(p) => self.shell_session_status(Parameters(p)).await,
-            S::ShStop(p) => self.shell_session_stop(Parameters(p)).await,
-            S::ShList => self.shell_session_list().await,
+            S::PtyStart(p) => self.pty_command_start(Parameters(p)).await.map(Into::into),
+            S::PtyStdin(p) => self
+                .pty_command_write_stdin(Parameters(p))
+                .await
+                .map(Into::into),
+            S::PtyStop(p) => self.pty_command_stop(Parameters(p)).await.map(Into::into),
+            S::PtyList => self.pty_command_list().await.map(Into::into),
+            S::CredentialRequest(p) => {
+                self.credential_request(Parameters(p), request_state, input_responses, ctx)
+                    .await
+            }
+            S::ShStart(p) => self
+                .shell_session_start(Parameters(p))
+                .await
+                .map(Into::into),
+            S::ShExec(p) => self.shell_session_exec(Parameters(p)).await.map(Into::into),
+            S::ShStatus(p) => self
+                .shell_session_status(Parameters(p))
+                .await
+                .map(Into::into),
+            S::ShStop(p) => self.shell_session_stop(Parameters(p)).await.map(Into::into),
+            S::ShList => self.shell_session_list().await.map(Into::into),
         }
     }
 
