@@ -26,7 +26,7 @@ document under `docs/research/` or a README line range.
                                  v
 +----------------------------------------------------------------------+
 |   terminal-commander-mcp   (thin, per-session, unprivileged)         |
-|   - rmcp 3.4.1 server, stdio transport                               |
+|   - rmcp 3.9.0 server, stdio transport                               |
 |   - translates MCP tool calls to daemon IPC calls                    |
 +--------------------------------|-------------------------------------+
                                  |  local IPC (UDS on Unix, named pipe on Windows)
@@ -522,7 +522,7 @@ landed and are live:
 
 - `terminal-commanderd` binary entry point (`crates/daemon/src/main.rs`).
 - `terminal-commander-mcp` binary entry point (`crates/mcp/src/main.rs`).
-- rmcp stdio adapter (TC40; now rmcp 3.4.1).
+- rmcp stdio adapter (TC40; now rmcp 3.9.0).
 - Daemon UDS / named-pipe IPC (TC37).
 - Persistent audit log (TC35 / V0003 migration).
 - PTY spawn (TC44; `crates/probes/src/pty.rs`, plus the Windows ConPTY

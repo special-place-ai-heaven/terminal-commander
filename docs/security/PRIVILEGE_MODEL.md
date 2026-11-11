@@ -34,7 +34,7 @@ TC is a two-process system (per `docs/research/_USER_DECISIONS.md`):
         |                             |
         v                             v
   terminal-commander-mcp        terminal-commanderd
-  (rmcp 3.4.1 stdio,            (long-running daemon,
+  (rmcp 3.9.0 stdio,            (long-running daemon,
    spawned per-MCP-session)      single instance per user)
         |                             |
         |    local IPC (UDS / pipe)   |
@@ -81,7 +81,7 @@ in `scripts/linux-gate.sh`, run by CI. (Daemon bring-up is done by the
 
 ## 4. The local transport
 
-The MCP transport is rmcp 3.4.1 stdio (per
+The MCP transport is rmcp 3.9.0 stdio (per
 `docs/research/mcp-transport-pattern.md` and the locked decision in
 `_USER_DECISIONS.md`). Implications:
 

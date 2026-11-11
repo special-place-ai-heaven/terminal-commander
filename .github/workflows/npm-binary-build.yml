@@ -83,7 +83,7 @@ env:
 jobs:
   pre-build-gates:
     name: pre-build-gates (linux-x64)
-    runs-on: [self-hosted, linux, x64, fresh]
+    runs-on: ${{ fromJSON(vars.TP_RUNS_ON || '["self-hosted","linux","x64","fresh"]') }}
     permissions:
       contents: read
     env:
@@ -267,7 +267,7 @@ jobs:
       - build-windows-x64
       - build-mac-x64
       - build-mac-arm64
-    runs-on: [self-hosted, linux, x64, fresh]
+    runs-on: ${{ fromJSON(vars.TP_RUNS_ON || '["self-hosted","linux","x64","fresh"]') }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

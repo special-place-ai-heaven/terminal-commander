@@ -58,6 +58,9 @@ async fn paired_service() -> (
         )
         .await
         .expect("client serve");
+    // rmcp >=3.5.1: the server answers discover, then waits for the first
+    // non-discover request; send one before joining the server task.
+    client.list_all_tools().await.expect("first real request");
     let server = server_handle.await.expect("server task join");
     (server, client)
 }

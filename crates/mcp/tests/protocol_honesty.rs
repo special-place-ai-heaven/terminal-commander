@@ -66,6 +66,9 @@ async fn discover_negotiates_2026_07_28_and_system_discover_matches() {
         )
         .await
         .expect("modern discover");
+    // rmcp >=3.5.1: the server answers discover, then waits for the first
+    // non-discover request; send one before joining the server task.
+    client.list_all_tools().await.expect("first real request");
     let server = server_task.await.expect("server task join");
 
     let info = client.peer_info().expect("peer info");
@@ -105,6 +108,9 @@ async fn list_tools_emits_sep2549_ttl_ms_and_cache_scope() {
         )
         .await
         .expect("modern discover");
+    // rmcp >=3.5.1: the server answers discover, then waits for the first
+    // non-discover request; send one before joining the server task.
+    client.list_all_tools().await.expect("first real request");
     let server = server_task.await.expect("server task join");
 
     let listed = client.list_tools(None).await.expect("tools/list");
@@ -191,6 +197,9 @@ async fn discover_accepts_older_preferred_version() {
         )
         .await
         .expect("legacy preferred version");
+    // rmcp >=3.5.1: the server answers discover, then waits for the first
+    // non-discover request; send one before joining the server task.
+    client.list_all_tools().await.expect("first real request");
     let server = server_task.await.expect("server task join");
     assert_eq!(
         client.peer_info().expect("peer info").protocol_version,
