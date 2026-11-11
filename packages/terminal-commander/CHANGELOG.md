@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.19](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.18...v0.3.19) (2026-11-11)
+
+
+### Features
+
+* **bucket_wait:** caller-chosen wait up to a policy ceiling, wake on match, return on exit ([#285](https://github.com/special-place-ai-heaven/terminal-commander/issues/285)) ([8a85e2b](https://github.com/special-place-ai-heaven/terminal-commander/commit/8a85e2bdd782b79ea6f6dce8b6b68f112fb9b136))
+
 ## [0.3.18](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.17...v0.3.18) (2026-11-11)
 
 
