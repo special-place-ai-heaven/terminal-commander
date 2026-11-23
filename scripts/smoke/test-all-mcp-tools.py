@@ -27,6 +27,7 @@ def main() -> int:
     probe_file.write_text("terminal-commander smoke line\nsecond line\n", encoding="utf-8")
 
     env = os.environ.copy()
+    env["TC_SURFACE"] = "full"  # drives granular tools by name; code is the server default
     env.pop("TC_WSL_DISTRO", None)
     env["TC_DEBUG_SESSION"] = env.get("TC_DEBUG_SESSION", "1")
 

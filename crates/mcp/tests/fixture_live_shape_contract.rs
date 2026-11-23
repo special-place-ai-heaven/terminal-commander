@@ -412,7 +412,8 @@ async fn fixtures_match_live_tool_responses() {
 
     let (server_transport, client_transport) = tokio::io::duplex(256 * 1024);
     let daemon = McpDaemonClient::new(endpoint).with_timeout(Duration::from_secs(10));
-    let server = TerminalCommanderMcpServer::new(daemon);
+    let server = TerminalCommanderMcpServer::new(daemon)
+        .with_surface(terminal_commander_mcp::surface::Surface::Full);
     let server_task =
         tokio::spawn(async move { server.serve(server_transport).await.expect("server serve") });
     let client = TestClient

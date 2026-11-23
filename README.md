@@ -386,8 +386,8 @@ terminal-commander setup harness --surface compact
 (`code_search`, `code_execute`, `status`, ~2.1 KB schema) calling all 60
 operations inside a zero-egress VM. `compact` exposes six action-dispatched
 facade tools (`command`, `files`, `recipe`, `registry`, `session`, `status`).
-`full` exposes all 60 granular tools and is the server default when `TC_SURFACE`
-is unset. All three views reach the same daemon operations and enforce the same policy.
+`code` is the server default when `TC_SURFACE` is unset; only an explicit
+`full` exposes all 60 granular tools. All three views reach the same daemon operations and enforce the same policy.
 
 Or target one harness:
 
@@ -609,12 +609,12 @@ Terminal Commander offers two schema views over the same runtime:
 
 | Surface | Tools advertised | Intended use |
 | --- | --- | --- |
-| `code` | `code_search`, `code_execute`, `status` | Pure-Rust Python 3.14-subset Code Mode sandbox (~2.1 KB schema; 1-turn multi-step chaining over all 60 operations). |
+| `code` | `code_search`, `code_execute`, `status` | Pure-Rust Python 3.14-subset Code Mode sandbox (~2.1 KB schema; 1-turn multi-step chaining over all 60 operations). Default. |
 | `compact` | `command`, `files`, `recipe`, `registry`, `session`, `status` | Small, stable action-dispatched surface for LLM harnesses. |
-| `full` | 60 granular tools | Explicit per-operation names for clients that prefer a broad schema (default). |
+| `full` | 60 granular tools | Explicit per-operation names for clients that prefer a broad schema. |
 
 Set the view with `TC_SURFACE=code|compact|full` or `setup harness --surface ...`.
-Unset or unrecognized values select `full`. `code` and `compact` calls validate
+Unset or unrecognized values select `code`. `code` and `compact` calls validate
 arguments before they reach the same daemon handlers used by the full surface.
 
 | Compact facade | Responsibilities |
@@ -895,7 +895,7 @@ swapped (identity-gated) before tool calls proceed.
 | `TC_SOCKET` | Full endpoint override (pipe name / socket path). Wins over `TC_SESSION`. |
 | `TC_DATA` | State-dir base override (default: `%LOCALAPPDATA%\terminal-commanderd\state` on Windows, `~/.local/share/terminal-commanderd` on Unix). |
 | `TC_IDLE_TTL_SECS` | Idle self-reap TTL in seconds (default 1800; `0` disables). |
-| `TC_SURFACE` | MCP schema view: `code` (3 Code Mode tools), `compact` (six facades), or `full` (60 granular tools; default). |
+| `TC_SURFACE` | MCP schema view: `code` (3 Code Mode tools; default), `compact` (six facades), or `full` (60 granular tools). |
 | `TC_USE_LEGACY_WSL_BRIDGE` | `1` opts into the legacy Windows→WSL bridge. |
 | `TC_WSL_DISTRO` | Selects the WSL distro for the legacy bridge. |
 | `TC_DAEMON_CHILD` | Set to `1` by the daemon in every command it starts (which also no longer inherit `TC_SOCKET` or `TC_DATA`); Linux/WSL autostart does nothing when it is set. |

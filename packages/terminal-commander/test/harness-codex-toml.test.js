@@ -167,3 +167,51 @@ test("writeCodexTomlConfig strips a leading UTF-8 BOM before the section check",
   // The rewritten file carries no BOM.
   assert.equal(text.charCodeAt(0) === 0xfeff, false, "rewritten config must not carry the BOM");
 });
+
+const APPROVAL = (tool) => new RegExp(`\\[mcp_servers\\.terminal_commander\\.tools\\.${tool}\\]\\napproval_mode = "approve"`);
+
+test("codex writer approves the code-surface tools by default and a re-run is a no-op", () => {
+  const target = tmpCfg();
+  assert.equal(writeCodexTomlConfig({ path: target, sessionToken: "tc-aaa111" }).status, "config_created");
+  const text = fs.readFileSync(target, "utf8");
+  for (const tool of ["code_search", "code_execute", "status"]) assert.match(text, APPROVAL(tool));
+  const again = writeCodexTomlConfig({ path: target, sessionToken: "tc-aaa111", force: true });
+  assert.equal(again.status, "already_exists");
+  assert.equal(fs.readFileSync(target, "utf8"), text);
+});
+
+test("codex force-rewrite adds missing code approvals from the stored surface and keeps user tables", () => {
+  const target = tmpCfg();
+  fs.writeFileSync(target, [
+    "[mcp_servers.terminal_commander]",
+    'command = "tc-mcp"',
+    "args = []",
+    "",
+    "[mcp_servers.terminal_commander.env]",
+    'TC_SURFACE = "code"',
+    "",
+    "[mcp_servers.terminal_commander.tools.run_and_watch]",
+    'approval_mode = "approve"',
+    "",
+    "[mcp_servers.terminal_commander.tools.status]",
+    'approval_mode = "prompt"',
+    "",
+  ].join("\n"));
+  const r = writeCodexTomlConfig({ path: target, force: true, clobber_backup: true });
+  assert.equal(r.status, "config_updated");
+  const text = fs.readFileSync(target, "utf8");
+  assert.match(text, APPROVAL("code_search"));
+  assert.match(text, APPROVAL("code_execute"));
+  assert.match(text, APPROVAL("run_and_watch"));
+  assert.match(text, /tools\.status\]\napproval_mode = "prompt"/);
+  assert.equal((text.match(/tools\.status\]/g) || []).length, 1);
+});
+
+test("codex writer adds no code approvals for an explicit full surface or for grok", () => {
+  const full = tmpCfg();
+  writeCodexTomlConfig({ path: full, surface: "full" });
+  assert.doesNotMatch(fs.readFileSync(full, "utf8"), /\.tools\./);
+  const grok = tmpCfg();
+  writeCodexTomlConfig({ path: grok, providerId: "grok" });
+  assert.doesNotMatch(fs.readFileSync(grok, "utf8"), /\.tools\./);
+});

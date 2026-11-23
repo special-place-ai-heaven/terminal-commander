@@ -38,6 +38,8 @@
 #       python3, missing node, unsupported host arch).
 
 set -euo pipefail
+# This smoke drives granular tools by name; code is the server default.
+export TC_SURFACE=full
 
 err() { echo "verify-npm-local-install: $*" >&2; }
 

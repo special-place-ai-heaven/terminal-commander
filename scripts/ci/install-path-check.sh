@@ -27,6 +27,8 @@
 # when nothing failed; 2 for an environment problem. Values of environment
 # variables are never printed, only names.
 set -uo pipefail
+# This smoke drives granular tools by name; code is the server default.
+export TC_SURFACE=full
 
 BIN_SRC="${1:-}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

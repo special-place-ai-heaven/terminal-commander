@@ -93,10 +93,11 @@ Machine-readable fixture:
 
 ## 2. Live tool catalogue
 
-The full rmcp stdio surface exposes 60 live tools. With
-`TC_SURFACE=compact`, the adapter instead advertises six action-dispatched
+The full rmcp stdio surface (`TC_SURFACE=full`) exposes 60 live tools. The
+default `code` surface advertises `code_search`, `code_execute`, and `status`.
+With `TC_SURFACE=compact`, the adapter instead advertises six action-dispatched
 facades: `command`, `files`, `recipe`, `registry`, `session`, and `status`.
-Both surfaces route to the same handlers and policy boundary. `recipe` is
+All surfaces route to the same handlers and policy boundary. `recipe` is
 the argv recipe registry. It is separate from `registry` (signal rules).
 Recipe actions are not accepted on the `registry` facade.
 

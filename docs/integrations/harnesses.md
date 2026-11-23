@@ -78,6 +78,17 @@ setup explicitly selects another surface.
 
 Codex adds `required = true` and `startup_timeout_sec = 60` when these fields
 are missing. Explicit existing values, including `required = false`, remain.
+When the effective surface is `code` (`--surface code`, a stored
+`TC_SURFACE = "code"`, or none, since `code` is the server default), the Codex
+writer also adds `[mcp_servers.terminal_commander.tools.<tool>]` tables with
+`approval_mode = "approve"` for `code_search`, `code_execute`, and `status`
+when they are missing. Existing tool tables, granular approvals included, are
+kept unchanged. Grok gets no approval tables.
+
+`terminal-commander doctor harness` warns when a Claude Code agent's `tools:`
+frontmatter in `~/.claude/agents/*.md` names `mcp__terminal_commander__<tool>`
+entries the configured surface does not expose; such an agent gets none of
+them.
 Grok CLI does not receive Codex-specific defaults or protocol environment
 settings.
 

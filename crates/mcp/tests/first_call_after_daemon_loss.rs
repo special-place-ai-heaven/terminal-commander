@@ -81,6 +81,7 @@ impl Adapter {
             .arg(&state_dir)
             .env("TC_SOCKET", &socket)
             .env("TC_DATA", dir.path())
+            .env("TC_SURFACE", "full")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
