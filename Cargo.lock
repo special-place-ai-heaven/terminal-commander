@@ -2471,7 +2471,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "clap",
  "serde_json",
@@ -2486,7 +2486,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-codemode"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "monty",
  "monty-types",
@@ -2502,7 +2502,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "indexmap",
  "parking_lot",
@@ -2517,7 +2517,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-ipc"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "libc",
  "serde",
@@ -2529,7 +2529,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-mcp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "clap",
  "rmcp",
@@ -2552,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-probes"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "libc",
  "notify",
@@ -2570,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-sifters"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aho-corasick",
  "indexmap",
@@ -2584,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-store"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "indexmap",
  "regex",
@@ -2598,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-supervisor"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2611,7 +2611,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commanderd"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "clap",
  "libc",
