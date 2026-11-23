@@ -199,14 +199,14 @@ test("bin/terminal-commander.js wires the re-register into the npm-success branc
   );
   assert.match(
     src,
-    /spawn\(\s*process\.execPath\s*,\s*\[\s*entry\s*,\s*"setup"\s*,\s*"harness"\s*\]/,
+    /\["setup", "harness"[\s\S]{0,80}spawn\(\s*process\.execPath\s*,\s*\[\s*entry\s*,\s*\.\.\.setupArgs\s*\]/,
     "reregisterHarnesses must spawn `node <entry> setup harness` (new process, new binary)",
   );
 });
 
 // Run `update` with no npm environment variables (as when typed in a shell) and
 // the given answer to `npm root -g`; returns the result and recorded spawns.
-function runUpdateWithNpmRoot(npmRoot) {
+function runUpdateWithNpmRoot(npmRoot, extraArgs = []) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tc-update-root-"));
   try {
     const recordPath = path.join(tmpDir, "spawns.json");
@@ -225,7 +225,7 @@ function runUpdateWithNpmRoot(npmRoot) {
       fs.writeFileSync(fakeEntry, "// fake launcher (never executed; spawn is mocked)\n", "utf8");
       env.__TEST_NPM_ROOT__ = root;
     }
-    const result = spawnSync(process.execPath, ["--require", injector, UPDATE_SHIM, "update"], {
+    const result = spawnSync(process.execPath, ["--require", injector, UPDATE_SHIM, "update", ...extraArgs], {
       encoding: "utf8",
       timeout: 30_000,
       stdio: ["ignore", "pipe", "pipe"],
@@ -320,4 +320,26 @@ test("update says plainly why setup was not re-run when npm cannot report its ro
   assert.equal(result.status, 0, "a successful install must not turn into a failure");
   assert.match(result.stderr, /harness setup was not re-run \(`npm root -g` did not answer\)/);
   assert.equal(spawns.find(isSetupHarnessSpawn), undefined);
+});
+
+test("update --surface full passes the surface and --force to setup harness", () => {
+  const { result, spawns } = runUpdateWithNpmRoot("custom", ["--surface", "full"]);
+  assert.equal(result.status, 0, `stderr=${result.stderr}`);
+  const setupSpawn = spawns.find(isSetupHarnessSpawn);
+  assert.ok(setupSpawn, `expected a 'setup harness' spawn; spawns=${JSON.stringify(spawns)}`);
+  assert.deepEqual(setupSpawn.args.slice(1), ["setup", "harness", "--surface", "full", "--force"]);
+  assert.match(result.stdout, /tool surface set to full/);
+});
+
+test("update without a terminal and without --surface keeps the configured surface", () => {
+  const { result, spawns } = runUpdateWithNpmRoot("custom");
+  assert.equal(result.status, 0, `stderr=${result.stderr}`);
+  assert.deepEqual(spawns.find(isSetupHarnessSpawn).args.slice(1), ["setup", "harness"]);
+  assert.match(result.stdout, /tool surface unchanged/);
+});
+
+test("update rejects an unknown surface before running npm", () => {
+  const { result, spawns } = runUpdateWithNpmRoot("custom", ["--surface", "nope"]);
+  assert.equal(result.status, 64);
+  assert.equal(spawns.length, 0);
 });

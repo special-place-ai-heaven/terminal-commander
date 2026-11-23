@@ -88,5 +88,6 @@ function agentSurfaceWarnings(opts) {
 
 module.exports = {
   agentSurfaceWarnings,
+  claudeSurface,
   SURFACE_TOOLS,
 };

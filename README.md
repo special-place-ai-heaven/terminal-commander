@@ -867,6 +867,7 @@ terminal-commander session reap --all
 
 ```powershell
 terminal-commander update
+terminal-commander update --surface code   # no menu; for agents and scripts
 ```
 
 `update` runs the same public npm command (`npm install -g
