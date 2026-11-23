@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.19...v0.4.0) (2026-11-23)
+
+
+### Features
+
+* **codemode:** add Pure-Rust Code Mode sandbox, TC_SURFACE=code, and CLI code/q ([#300](https://github.com/special-place-ai-heaven/terminal-commander/issues/300)) ([894176b](https://github.com/special-place-ai-heaven/terminal-commander/commit/894176bce24199e7e978b071a6d4df1b7327b7e1))
+
 ## [0.3.19](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.18...v0.3.19) (2026-11-11)
 
 
