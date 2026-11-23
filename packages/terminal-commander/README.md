@@ -56,7 +56,7 @@ This runs `npm install -g terminal-commander@latest`.
 
 At a terminal, `update` asks which tool surface to configure (code mode,
 MCP full, or MCP compact; Enter keeps the current one). Agents and scripts
-pass `--surface code|full|compact` instead; with no terminal and no flag the
+pass `--surface code|mcp-full|mcp-compact` instead; with no terminal and no flag the
 configured surface is kept. It prints the installed version and reminds you to
 restart running agent sessions, whose adapters the update stops.
 

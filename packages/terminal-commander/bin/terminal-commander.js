@@ -46,11 +46,11 @@ function parseUpdateArgs(argv) {
   }
   const used = eq > 0 ? 1 : 2;
   if (flag !== "--surface" || rest.length !== used) {
-    return { error: "usage: terminal-commander update [--surface code|full|compact]" };
+    return { error: "usage: terminal-commander update [--surface code|mcp-full|mcp-compact]" };
   }
-  const mode = String(value || "").trim().toLowerCase();
+  const mode = require("../lib/cli/surface_prompt.js").normalizeSurface(value || "");
   if (!UPDATE_MODES.has(mode)) {
-    return { error: `terminal-commander: --surface must be code, full or compact (got '${value || ""}')` };
+    return { error: `terminal-commander: --surface must be code, mcp-full or mcp-compact (got '${value || ""}')` };
   }
   return { mode };
 }

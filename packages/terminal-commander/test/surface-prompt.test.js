@@ -34,7 +34,7 @@ test("Enter keeps the current surface and the menu marks it", async () => {
 
 test("a number or a name picks; anything else asks again", async () => {
   assert.equal(await chooseSurface({ interactive: true, current: "code", ask: asker(["3"]).ask }), "compact");
-  const a = asker(["9", "full"]);
+  const a = asker(["9", "mcp-full"]);
   assert.equal(await chooseSurface({ interactive: true, current: "code", ask: a.ask }), "full");
   assert.equal(a.seen.length, 2);
 });

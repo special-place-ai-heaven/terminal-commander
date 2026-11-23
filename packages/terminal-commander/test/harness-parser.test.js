@@ -53,7 +53,12 @@ test("setup (default subcommand) accepts --surface", () => {
 test("setup harness rejects --surface bogus with a bounded error", () => {
   const r = parseArgv(["setup", "harness", "--surface", "bogus"]);
   assert.equal(r.ok, false);
-  assert.match(r.error, /--surface must be 'code', 'compact', or 'full'/);
+  assert.match(r.error, /--surface must be 'code', 'mcp-full', or 'mcp-compact'/);
+});
+
+test("setup harness --surface mcp-full / mcp-compact map to the server values", () => {
+  assert.equal(parseArgv(["setup", "harness", "--surface", "mcp-full"]).flags.surface, "full");
+  assert.equal(parseArgv(["setup", "harness", "--surface", "MCP-Compact"]).flags.surface, "compact");
 });
 
 test("setup harness --surface requires a value", () => {

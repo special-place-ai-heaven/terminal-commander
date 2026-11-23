@@ -13,6 +13,12 @@ const SURFACES = Object.freeze([
   { id: "compact", label: "MCP compact (6 facades)" },
 ]);
 
+/** `mcp-full` / `mcp-compact` are the CLI names; TC_SURFACE keeps the server's `full` / `compact`. */
+function normalizeSurface(value) {
+  const v = String(value).trim().toLowerCase();
+  return v === "mcp-full" ? "full" : v === "mcp-compact" ? "compact" : v;
+}
+
 /**
  * @param {Object} o
  * @param {string} [o.flag] value of --surface, already validated
@@ -27,7 +33,7 @@ async function chooseSurface(o) {
   const lines = SURFACES.map((s, i) => `  [${i + 1}] ${s.label}${s.id === o.current ? "  (current)" : ""}`);
   const def = SURFACES.findIndex((s) => s.id === o.current) + 1 || 1;
   for (;;) {
-    const answer = (await o.ask(`Tool surface:\n${lines.join("\n")}\nChoose 1-3 [${def}]: `)).trim().toLowerCase();
+    const answer = normalizeSurface(await o.ask(`Tool surface:\n${lines.join("\n")}\nChoose 1-3 [${def}]: `));
     if (answer === "") return SURFACES[def - 1].id;
     const byNumber = SURFACES[Number(answer) - 1];
     const byName = SURFACES.find((s) => s.id === answer);
@@ -35,4 +41,4 @@ async function chooseSurface(o) {
   }
 }
 
-module.exports = { chooseSurface, SURFACES };
+module.exports = { chooseSurface, normalizeSurface, SURFACES };

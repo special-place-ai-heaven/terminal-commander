@@ -343,3 +343,9 @@ test("update rejects an unknown surface before running npm", () => {
   assert.equal(result.status, 64);
   assert.equal(spawns.length, 0);
 });
+
+test("update --surface mcp-compact maps to the server's compact value", () => {
+  const { result, spawns } = runUpdateWithNpmRoot("custom", ["--surface", "mcp-compact"]);
+  assert.equal(result.status, 0, `stderr=${result.stderr}`);
+  assert.deepEqual(spawns.find(isSetupHarnessSpawn).args.slice(1), ["setup", "harness", "--surface", "compact", "--force"]);
+});
