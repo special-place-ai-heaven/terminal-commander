@@ -34,8 +34,8 @@ mod isolated_env;
 /// daemon is a sibling crate, so derive its path from this test binary's
 /// location: `target/<profile>/deps/<test>` -> `target/<profile>/<name>`.
 fn target_bin(name: &str) -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    let profile_dir = exe.parent().and_then(|p| p.parent()).expect("profile dir");
+    let bin_exe = PathBuf::from(env!("CARGO_BIN_EXE_terminal-commander"));
+    let profile_dir = bin_exe.parent().expect("profile dir");
     let mut bin = profile_dir.join(name);
     if cfg!(windows) {
         bin.set_extension("exe");

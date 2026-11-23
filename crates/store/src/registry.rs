@@ -360,8 +360,8 @@ impl EventStore {
                 rule_id,
                 version: u32::try_from(version_i).unwrap_or(0),
                 event_kind,
-                summary_template: def.summary_template.clone(),
-                tags: def.tags.clone(),
+                summary_template: def.summary_template,
+                tags: def.tags,
                 severity,
                 status,
             });

@@ -24,14 +24,8 @@ mod isolated_env;
 /// package; for cross-package binaries we derive the path from the
 /// current executable's location.
 fn target_bin(name: &str) -> PathBuf {
-    // The test binary lives at target/<profile>/deps/<test_binary>.
-    // Sibling binaries live at target/<profile>/<name>[.exe].
-    let exe = std::env::current_exe().expect("current_exe");
-    // Go up from deps/ to profile/
-    let profile_dir = exe
-        .parent() // deps/
-        .and_then(|p| p.parent()) // <profile>/
-        .expect("profile dir");
+    let bin_exe = PathBuf::from(env!("CARGO_BIN_EXE_terminal-commander-mcp"));
+    let profile_dir = bin_exe.parent().expect("profile dir");
     let mut bin = profile_dir.join(name);
     if cfg!(windows) {
         bin.set_extension("exe");

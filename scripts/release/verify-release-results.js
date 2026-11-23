@@ -18,6 +18,7 @@ const EXPECTED_RELEASE_JOBS = Object.freeze([
   "publish-cargo-terminal-commander-store",
   "publish-cargo-terminal-commander-supervisor",
   "publish-cargo-terminal-commander-ipc",
+  "publish-cargo-terminal-commander-codemode",
   "publish-cargo-terminal-commanderd",
   "publish-cargo-terminal-commander-mcp",
   "verify-linux-x64",

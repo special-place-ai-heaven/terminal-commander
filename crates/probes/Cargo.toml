@@ -107,4 +107,5 @@ doc_markdown = "allow"
 doc_overindented_list_items = "allow"
 doc_lazy_continuation = "allow"
 significant_drop_tightening = "allow"
+chunks_exact_to_as_chunks = "allow"
 assert_is_empty = "allow"      # mirrors the workspace table; see root Cargo.toml

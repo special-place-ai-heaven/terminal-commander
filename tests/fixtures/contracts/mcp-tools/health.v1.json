@@ -29,7 +29,7 @@
       "build": {
         "source_fingerprint": "fnv1a128:00000000000000000000000000000000",
         "target": "x86_64-unknown-linux-gnu",
-        "compiler": "rustc 1.97.1",
+        "compiler": "rustc 1.100.0",
         "profile": "release",
         "features": "",
         "provenance": null
