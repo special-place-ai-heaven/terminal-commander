@@ -27,8 +27,6 @@
 # when nothing failed; 2 for an environment problem. Values of environment
 # variables are never printed, only names.
 set -uo pipefail
-# This smoke drives granular tools by name; code is the server default.
-export TC_SURFACE=full
 
 BIN_SRC="${1:-}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -334,7 +332,7 @@ fi
 # ---- d. installed MCP adapter --------------------------------------------------
 
 cat > "$WORK/mcp_check.py" <<'PYEOF'
-import json, subprocess, sys, time
+import json, os, subprocess, sys, time
 
 expected_version, stderr_path = sys.argv[1], sys.argv[2]
 META = {
@@ -342,7 +340,8 @@ META = {
     "io.modelcontextprotocol/clientCapabilities": {},
     "io.modelcontextprotocol/clientInfo": {"name": "install-path-check", "version": "0.0.0"},
 }
-proc = subprocess.Popen(["terminal-commander-mcp"], stdin=subprocess.PIPE,
+# Drives granular tools by name; code is the server default.
+proc = subprocess.Popen(["terminal-commander-mcp"], env={**os.environ, "TC_SURFACE": "full"}, stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE, stderr=open(stderr_path, "w"),
                         text=True, bufsize=1)
 next_id = 1
