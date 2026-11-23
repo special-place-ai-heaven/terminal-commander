@@ -25,6 +25,7 @@ fn server() -> TerminalCommanderMcpServer {
         McpDaemonClient::new(std::env::temp_dir().join("tc-mcp-protocol-honesty-absent"))
             .with_timeout(Duration::from_millis(50)),
     )
+    .with_surface(terminal_commander_mcp::surface::Surface::Full)
 }
 
 fn first_text(result: &rmcp::model::CallToolResult) -> String {

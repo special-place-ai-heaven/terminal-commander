@@ -156,7 +156,8 @@ async fn paired_with_targets(
     let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
     let daemon = McpDaemonClient::new(local.socket_path().to_path_buf())
         .with_timeout(Duration::from_secs(5));
-    let server = TerminalCommanderMcpServer::with_targets(daemon, targets);
+    let server = TerminalCommanderMcpServer::with_targets(daemon, targets)
+        .with_surface(terminal_commander_mcp::surface::Surface::Full);
     let server_handle =
         tokio::spawn(async move { server.serve(server_transport).await.expect("server serve") });
     let client = TestClient

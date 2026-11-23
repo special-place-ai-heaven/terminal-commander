@@ -375,7 +375,7 @@ FLAGS
                                       advertises. Writes env.TC_SURFACE into
                                       each harness stanza (cursor, claude-code,
                                       claude-desktop). Omit to leave it unset
-                                      (server default). 'code' = 3 Code Mode
+                                      (server default: code). 'code' = 3 Code Mode
                                       tools; 'compact' = 6 verb facades;
                                       'full' = all 60 tools.
   --uninstall                         (daemon-logon only) Remove the per-user

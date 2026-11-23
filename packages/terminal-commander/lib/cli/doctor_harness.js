@@ -6,6 +6,7 @@
 const { detectAllHarnesses } = require("../harness/detect.js");
 const { listProviders } = require("../harness/registry.js");
 const { entryConfigured } = require("../harness/needs.js");
+const { agentSurfaceWarnings } = require("./agent_surface.js");
 
 function runDoctorHarness(opts) {
   const o = opts || {};
@@ -45,6 +46,8 @@ function runDoctorHarness(opts) {
         "agent gets a per-harness TC_SESSION and its own daemon endpoint.",
     );
   }
+  const agentWarnings = o.agentWarnings || agentSurfaceWarnings({ platform, env });
+  if (agentWarnings.length) lines.push("", ...agentWarnings);
   return {
     status: "ok",
     exit_code: 0,

@@ -14,8 +14,8 @@ bind a network listener.
 - `system_discover` is the runtime authority for available methods, policy,
   host probes, ranked access routes, and the current beachhead.
 
-Set `TC_SURFACE=compact` or `TC_SURFACE=full` before starting the adapter. The
-default is documented in the root [README](../../README.md).
+Set `TC_SURFACE=compact` or `TC_SURFACE=full` before starting the adapter.
+Unset or unrecognized values select `code` (see the root [README](../../README.md)).
 
 ## Safety and output contract
 

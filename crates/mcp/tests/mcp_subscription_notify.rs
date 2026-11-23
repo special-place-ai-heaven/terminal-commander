@@ -139,7 +139,8 @@ async fn paired(
     // `with_notify` bypasses the TC_MCP_NOTIFY env read so the test never
     // mutates process-global env (set_var is `unsafe` under edition 2024 and
     // the crate forbids unsafe_code).
-    let server = TerminalCommanderMcpServer::with_notify(daemon, notify);
+    let server = TerminalCommanderMcpServer::with_notify(daemon, notify)
+        .with_surface(terminal_commander_mcp::surface::Surface::Full);
     let server_handle =
         tokio::spawn(async move { server.serve(server_transport).await.expect("server serve") });
     let client = recorder

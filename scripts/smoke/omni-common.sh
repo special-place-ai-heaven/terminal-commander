@@ -24,6 +24,8 @@
 #   2 -- environment/harness problem (missing cargo/python3, build fail).
 
 set -euo pipefail
+# This smoke drives granular tools by name; code is the server default.
+export TC_SURFACE=full
 
 omni_err() { echo "verify-omni: $*" >&2; }
 

@@ -15,6 +15,7 @@ use terminal_commander_mcp::tools::TerminalCommanderMcpServer;
 
 fn server() -> TerminalCommanderMcpServer {
     TerminalCommanderMcpServer::new(McpDaemonClient::new("/nonexistent-tc-test.sock"))
+        .with_surface(terminal_commander_mcp::surface::Surface::Full)
 }
 
 #[test]

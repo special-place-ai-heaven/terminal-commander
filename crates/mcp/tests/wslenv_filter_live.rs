@@ -95,7 +95,7 @@ impl Adapter {
         .env(SECRET_NAME, SECRET_VALUE)
         .env("TC_TEST_HARMLESS", "harmless")
         .env_remove("TC_SESSION")
-        .env_remove("TC_SURFACE")
+        .env("TC_SURFACE", "full")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

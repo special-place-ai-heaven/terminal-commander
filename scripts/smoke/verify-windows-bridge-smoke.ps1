@@ -45,6 +45,8 @@ param(
 )
 
 Set-StrictMode -Version Latest
+# This smoke drives granular tools by name; code is the server default.
+$env:TC_SURFACE = 'full'
 $ErrorActionPreference = "Stop"
 
 $script:OverallExit = 0

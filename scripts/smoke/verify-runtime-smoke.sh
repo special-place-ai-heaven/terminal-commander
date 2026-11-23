@@ -52,6 +52,8 @@
 # not have on PATH -- the preamble below adds them when present.
 
 set -euo pipefail
+# This smoke drives granular tools by name; code is the server default.
+export TC_SURFACE=full
 
 err() { echo "verify-runtime-smoke: $*" >&2; }
 

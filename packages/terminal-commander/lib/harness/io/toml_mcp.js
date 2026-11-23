@@ -23,6 +23,31 @@ const SERVER_NAME = "terminal_commander";
 const BLOCK_COMMENT =
   "# Terminal Commander MCP stdio adapter (merged by terminal-commander bootstrap).";
 const MAX_CONFIG_BYTES = 256 * 1024;
+// Code Mode's tools. Codex prompts per tool call until a tool has an approval
+// table, so a code-surface install that only carried granular approvals made
+// every code_execute prompt.
+const CODE_SURFACE_TOOLS = Object.freeze(["code_search", "code_execute", "status"]);
+
+function toolsSectionName(tool) {
+  return `mcp_servers.${SERVER_NAME}.tools.${tool}`;
+}
+
+/**
+ * Approval tables for the code surface that `present` (section names) lacks.
+ * Existing tables are never rewritten: a user's own approval_mode wins, and
+ * granular approvals stay for a later switch back to full.
+ */
+function codeSurfaceApprovals(opts, surface, present) {
+  if (opts.providerId === "grok" || surface !== "code") return "";
+  return CODE_SURFACE_TOOLS.filter((tool) => !present.has(toolsSectionName(tool)))
+    .map((tool) => `\n[${toolsSectionName(tool)}]\napproval_mode = "approve"\n`)
+    .join("");
+}
+
+/** Effective surface: explicit flag, else the stored TC_SURFACE, else the server default (code). */
+function effectiveSurface(explicit, stored) {
+  return String(explicit || stored || "code").trim().toLowerCase();
+}
 
 const TOML_MCP_STATUSES = Object.freeze({
   CONFIG_CREATED: "config_created",
@@ -74,7 +99,7 @@ function isLikelyMalformedToml(text) {
  *
  * @param {Object} [opts]
  * @param {string} [opts.sessionToken]  Validated TC_SESSION token (throws if unsafe).
- * @param {("compact"|"full")} [opts.surface]  Optional TC_SURFACE.
+ * @param {("code"|"compact"|"full")} [opts.surface]  Optional TC_SURFACE.
  * @param {string} [opts.distro]  Optional WSL distro (emitted only on win32).
  * @param {string} [opts.platform]
  * @returns {Object} env map (possibly empty)
@@ -119,7 +144,7 @@ function buildCodexTomlBlock(opts) {
       lines.push(`${key} = ${JSON.stringify(env[key])}`);
     }
   }
-  return lines.join("\n") + "\n";
+  return lines.join("\n") + "\n" + codeSurfaceApprovals(o, effectiveSurface(o.surface), new Set());
 }
 
 // Split at statement boundaries, keeping comments and multiline values intact.
@@ -235,6 +260,9 @@ function refreshTomlEntry(text, opts) {
     if (!main.keys.has("startup_timeout_sec")) update(main, "startup_timeout_sec", 60);
   }
   const env = buildCodexEnv(opts);
+  const storedIdx = envs.length ? envs[0].keys.get("TC_SURFACE") : undefined;
+  const stored = storedIdx === undefined ? undefined : (statements[storedIdx].match(/=\s*["']([^"']*)["']/) || [])[1];
+  const approvals = codeSurfaceApprovals(opts, effectiveSurface(opts.surface, stored), new Set(sections.map((s) => s.name)));
   if (envs.length) {
     const section = envs[0];
     if (!Object.hasOwn(env, "TC_WSL_DISTRO")) update(section, "TC_WSL_DISTRO", null);
@@ -242,6 +270,7 @@ function refreshTomlEntry(text, opts) {
   } else if (Object.keys(env).length) {
     statements.push(`\n${ENV_SECTION_HEADER}\n` + Object.entries(env).map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`).join(""));
   }
+  if (approvals) statements.push(approvals);
   let merged = "";
   for (let i = 0; i <= statements.length; i++) {
     if (inserts.has(i)) merged += (merged && !merged.endsWith("\n") ? "\n" : "") + inserts.get(i);
@@ -323,6 +352,7 @@ module.exports = {
   buildCodexTomlBlock,
   buildCodexEnv,
   isLikelyMalformedToml,
+  CODE_SURFACE_TOOLS,
   TOML_MCP_STATUSES,
   SECTION_HEADER,
   ENV_SECTION_HEADER,
