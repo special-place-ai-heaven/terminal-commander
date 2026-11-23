@@ -3,9 +3,11 @@
 
 //! Tool-surface selection.
 //!
-//! `TC_SURFACE=compact` advertises the verb-dispatched facade tools; default
-//! `full` keeps the granular 60-tool surface. Read once per `tools/list` /
-//! `tools/call` so an operator can flip it without rebuild.
+//! `TC_SURFACE=compact` advertises the verb-dispatched facade tools;
+//! `TC_SURFACE=code` advertises the 3-tool Code Mode surface (`code_search`,
+//! `code_execute`, `status`); default `full` keeps the granular 60-tool
+//! surface. Read once per `tools/list` / `tools/call` so an operator can flip
+//! it without rebuild.
 
 /// Which MCP tool surface to advertise + admit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +16,8 @@ pub enum Surface {
     Full,
     /// The verb-dispatched facade tools.
     Compact,
+    /// The 3-tool Python 3.14-subset Code Mode surface (`code_search`, `code_execute`, `status`).
+    Code,
 }
 
 impl Surface {
@@ -22,6 +26,7 @@ impl Surface {
     pub fn parse(raw: Option<&str>) -> Self {
         match raw.map(str::trim) {
             Some(v) if v.eq_ignore_ascii_case("compact") => Self::Compact,
+            Some(v) if v.eq_ignore_ascii_case("code") => Self::Code,
             _ => Self::Full,
         }
     }
@@ -43,6 +48,9 @@ mod tests {
         assert_eq!(Surface::parse(Some("full")), Surface::Full);
         assert_eq!(Surface::parse(Some("compact")), Surface::Compact);
         assert_eq!(Surface::parse(Some("COMPACT")), Surface::Compact); // case-insensitive
+        assert_eq!(Surface::parse(Some("code")), Surface::Code);
+        assert_eq!(Surface::parse(Some("CODE")), Surface::Code);
+        assert_eq!(Surface::parse(Some(" code ")), Surface::Code);
         assert_eq!(Surface::parse(Some("garbage")), Surface::Full); // unknown -> Full
     }
 }

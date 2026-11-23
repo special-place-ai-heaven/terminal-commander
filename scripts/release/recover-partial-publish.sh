@@ -25,6 +25,8 @@ CARGO_CRATES=(
   "terminal-commander-probes"
   "terminal-commander-store"
   "terminal-commander-supervisor"
+  "terminal-commander-ipc"
+  "terminal-commander-codemode"
   "terminal-commanderd"
   "terminal-commander-mcp"
 )

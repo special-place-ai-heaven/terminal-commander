@@ -198,12 +198,13 @@ test("all Cargo release jobs use the checksum-verifying retry state machine", ()
       "terminal-commander-supervisor",
       "terminal-commander-ipc",
       "terminal-commanderd",
+      "terminal-commander-codemode",
       "terminal-commander-mcp",
     ],
   );
   assert.doesNotMatch(workflow, /if cargo publish -p/);
-  assert.equal((workflow.match(/Setup Node for release state machine/g) || []).length, 8);
-  assert.equal((workflow.match(/cargo package and verify release archive/g) || []).length, 8);
+  assert.equal((workflow.match(/Setup Node for release state machine/g) || []).length, 9);
+  assert.equal((workflow.match(/cargo package and verify release archive/g) || []).length, 9);
   assert.doesNotMatch(workflow, /^\s+run: cargo publish --dry-run/m);
   assert.doesNotMatch(workflow, /Poll crates\.io until/);
 });

@@ -27,8 +27,8 @@ const SECRET_VALUE: &str = "value-never-surfaces-7Q";
 const AMBIENT: &str = "TC_TEST_SUDO_PASSWORD/u:TC_TEST_HARMLESS/u";
 
 fn target_bin(name: &str) -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    let profile_dir = exe.parent().and_then(|p| p.parent()).expect("profile dir");
+    let bin_exe = PathBuf::from(env!("CARGO_BIN_EXE_terminal-commander-mcp"));
+    let profile_dir = bin_exe.parent().expect("profile dir");
     profile_dir.join(name).with_extension("exe")
 }
 

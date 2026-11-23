@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::common::schema_for_type;
-use rmcp::model::Tool;
+use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 
 use crate::surface::Surface;
@@ -74,6 +74,10 @@ and their argv_template. Use a native shell route with exec, shell=route.executa
 pub const COMPACT_TOOL_NAMES: &[&str] = &[
     "command", "files", "recipe", "registry", "session", "status",
 ];
+
+/// The Code Mode tool names advertised + admitted on `TC_SURFACE=code`.
+/// KEEP IN SYNC with [`code_surface_tools`].
+pub const CODE_TOOL_NAMES: &[&str] = &["code_execute", "code_search", "status"];
 
 /// Walk `v` recursively and collect every `$defs/<name>` referenced by a
 /// `"$ref": "#/$defs/<name>"` string anywhere in the value tree.
@@ -321,7 +325,10 @@ fn slim_tool(mut tool: Tool) -> Tool {
 #[must_use]
 pub(crate) fn full_surface_tools(all: Vec<Tool>) -> Vec<Tool> {
     all.into_iter()
-        .filter(|t| !COMPACT_TOOL_NAMES.contains(&t.name.as_ref()))
+        .filter(|t| {
+            !COMPACT_TOOL_NAMES.contains(&t.name.as_ref())
+                && !matches!(t.name.as_ref(), "code_search" | "code_execute")
+        })
         .map(slim_tool)
         .collect()
 }
@@ -389,23 +396,68 @@ pub fn compact_surface_tools() -> Vec<Tool> {
     ]
 }
 
-/// Admission gate: under [`Surface::Compact`], reject any tool name not in the
-/// facade set. Under [`Surface::Full`] every name is admitted (the router does
-/// its own per-name routing).
+/// `tools/list` payload for `TC_SURFACE=code`.
+///
+/// Returns the three Code Mode `Tool`s (`code_search`, `code_execute`, and a
+/// flat 0-arg read-only `status`). KEEP IN SYNC with [`CODE_TOOL_NAMES`].
+#[must_use]
+pub fn code_surface_tools() -> Vec<rmcp::model::Tool> {
+    let code_search = surface_tool::<crate::code_mode::CodeSearchInput>(
+        "code_search",
+        crate::code_mode::CODE_SEARCH_DESCRIPTION,
+    )
+    .with_annotations(ToolAnnotations::new().read_only(true));
+
+    let code_execute = surface_tool::<crate::code_mode::CodeExecuteInput>(
+        "code_execute",
+        crate::code_mode::CODE_EXECUTE_DESCRIPTION,
+    );
+
+    let mut status_schema = Map::new();
+    status_schema.insert("type".to_owned(), Value::String("object".to_owned()));
+    status_schema.insert("properties".to_owned(), Value::Object(Map::new()));
+    let status = Tool::new(
+        "status",
+        crate::code_mode::CODE_STATUS_DESCRIPTION,
+        Arc::new(status_schema),
+    )
+    .with_annotations(ToolAnnotations::new().read_only(true));
+
+    vec![code_search, code_execute, status]
+}
+
+/// Admission gate: under [`Surface::Compact`] or [`Surface::Code`], reject any
+/// tool name not in the active surface set. Under [`Surface::Full`] every name
+/// is admitted (the router does its own per-name routing).
 ///
 /// # Errors
 ///
-/// Returns an `invalid_request` error when `surface` is `Compact` and
-/// `tool_name` is not one of [`COMPACT_TOOL_NAMES`]. The message tells the
-/// caller to set `TC_SURFACE=full` to reach the granular tool.
+/// Returns an `invalid_request` error when `surface` is `Compact` or `Code` and
+/// `tool_name` is not on that surface.
 pub fn enforce_surface(surface: Surface, tool_name: &str) -> Result<(), McpError> {
-    if surface == Surface::Compact && !COMPACT_TOOL_NAMES.contains(&tool_name) {
-        return Err(McpError::invalid_request(
-            format!("tool '{tool_name}' not on compact surface; set TC_SURFACE=full"),
-            None,
-        ));
+    match surface {
+        Surface::Full => Ok(()),
+        Surface::Compact => {
+            if !COMPACT_TOOL_NAMES.contains(&tool_name) {
+                return Err(McpError::invalid_request(
+                    format!("tool '{tool_name}' not on compact surface; set TC_SURFACE=full"),
+                    None,
+                ));
+            }
+            Ok(())
+        }
+        Surface::Code => {
+            if !CODE_TOOL_NAMES.contains(&tool_name) {
+                return Err(McpError::invalid_request(
+                    format!(
+                        "tool '{tool_name}' not on code surface; call code_search / code_execute or set TC_SURFACE=full"
+                    ),
+                    None,
+                ));
+            }
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -437,6 +489,41 @@ mod tests {
             !names.iter().any(|n| n.starts_with("recipe_")),
             "granular recipe_* tools must stay off the compact list"
         );
+    }
+    #[test]
+    fn code_list_is_exact_three_tools_within_byte_budget() {
+        let tools = code_surface_tools();
+        let mut names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
+        names.sort();
+        assert_eq!(names, vec!["code_execute", "code_search", "status"]);
+        for tool in &tools {
+            assert_eq!(
+                tool.input_schema.get("type").and_then(Value::as_str),
+                Some("object")
+            );
+            for combinator in ["allOf", "oneOf", "anyOf"] {
+                assert!(!tool.input_schema.contains_key(combinator));
+            }
+        }
+        let bytes = serde_json::to_string(&serde_json::json!({ "tools": tools }))
+            .expect("serialize code tools")
+            .len();
+        assert!(
+            bytes <= 4_500,
+            "code surface tools/list payload must stay <= 4,500 B, got {bytes}"
+        );
+    }
+
+    #[test]
+    fn enforce_surface_code_guides_to_code_execute() {
+        assert!(enforce_surface(Surface::Code, "code_search").is_ok());
+        assert!(enforce_surface(Surface::Code, "code_execute").is_ok());
+        assert!(enforce_surface(Surface::Code, "status").is_ok());
+        let err = enforce_surface(Surface::Code, "run_and_watch")
+            .expect_err("granular tool must be rejected on code surface");
+        assert!(err.message.contains("not on code surface"));
+        assert!(err.message.contains("code_execute"));
+        assert!(err.message.contains("TC_SURFACE=full"));
     }
 
     #[test]

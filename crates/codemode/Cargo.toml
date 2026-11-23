@@ -1,0 +1,36 @@
+[package]
+name = "terminal-commander-codemode"
+description = "Pure-Rust Monty Python 3.14-subset Code Mode sandbox and 60-op dispatcher for Terminal Commander."
+readme = "README.md"
+keywords = ["terminal-commander", "mcp", "codemode", "sandbox"]
+categories = ["development-tools"]
+edition.workspace = true
+rust-version = "1.98"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "terminal_commander_codemode"
+path = "src/lib.rs"
+
+[dependencies]
+terminal-commander-core.workspace = true
+terminal-commander-ipc.workspace = true
+monty = "1.6"
+monty-types = "1.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+serde_ignored = "0.1.14"
+parking_lot = "0.12.5"
+tokio = { workspace = true, features = ["rt", "time", "sync"] }
+tempfile = "3"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }
+
+[lints]
+workspace = true

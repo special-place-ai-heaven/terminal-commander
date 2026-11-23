@@ -24,8 +24,8 @@ mod isolated_env;
 const SUMMARY_BUDGET_CHARS: usize = 16_000;
 
 fn target_bin(name: &str) -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    let profile_dir = exe.parent().and_then(|p| p.parent()).expect("profile dir");
+    let bin_exe = PathBuf::from(env!("CARGO_BIN_EXE_terminal-commander-mcp"));
+    let profile_dir = bin_exe.parent().expect("profile dir");
     let mut bin = profile_dir.join(name);
     if cfg!(windows) {
         bin.set_extension("exe");

@@ -24,6 +24,7 @@ use terminal_commander_supervisor::paths::{
 // probes the daemon first and only constructs a `DaemonClient` once the
 // health handshake confirms it is live. The honest "unavailable; refusing
 // to synthesize" exit-69 path lives in `ipc::CliIpcError::Unavailable`.
+pub(crate) mod code;
 pub(crate) mod credential;
 pub(crate) mod ipc;
 pub(crate) mod render;
@@ -119,6 +120,17 @@ enum Command {
         #[command(subcommand)]
         op: CredentialOp,
     },
+    /// Code Mode Python 3.14-subset runner, TypedDict stubs, and agent idioms manual.
+    ///
+    /// Note for Windows `.cmd` shims: `cmd.exe` mangles multiline `-c` arguments;
+    /// prefer `terminal-commander code run -` (stdin) or `terminal-commander code run script.py`.
+    Code {
+        #[command(subcommand)]
+        op: code::CodeCommand,
+    },
+    /// Execute one granular Terminal Commander operation directly and print compact JSON.
+    #[command(name = "q", visible_alias = "query")]
+    Q(code::QueryArgs),
     /// Hidden npm-update preflight: stop TC binaries loaded from anywhere under
     /// the npm package scope dir (typically the parent `node_modules`).
     #[command(hide = true)]
@@ -264,6 +276,8 @@ fn run(cli: Cli) -> std::process::ExitCode {
         Command::Credential {
             op: CredentialOp::Provide { job_id, socket },
         } => credential::run_provide(&job_id, socket.as_deref()),
+        Command::Code { op } => code::run_code(op),
+        Command::Q(args) => code::run_query(&args),
         Command::UpdateLocks { scope_dir } => {
             let result = update_locks::stop_installed_processes(&scope_dir);
             for line in &result.lines {

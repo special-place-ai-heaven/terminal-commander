@@ -292,17 +292,15 @@ const fn windows_attributes_mark_reparse_point(attributes: u32) -> bool {
 }
 
 fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt as _;
-        windows_attributes_mark_reparse_point(metadata.file_attributes())
+        metadata.file_type().is_symlink()
+            || windows_attributes_mark_reparse_point(metadata.file_attributes())
     }
     #[cfg(not(windows))]
     {
-        false
+        metadata.file_type().is_symlink()
     }
 }
 

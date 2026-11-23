@@ -37,6 +37,12 @@ test("setup harness accepts --surface full", () => {
   assert.equal(r.flags.surface, "full");
 });
 
+test("setup harness accepts --surface code", () => {
+  const r = parseArgv(["setup", "harness", "--surface", "code", "--dry-run"]);
+  assert.equal(r.ok, true);
+  assert.equal(r.flags.surface, "code");
+});
+
 test("setup (default subcommand) accepts --surface", () => {
   const r = parseArgv(["setup", "--surface", "compact"]);
   assert.equal(r.ok, true);
@@ -47,7 +53,7 @@ test("setup (default subcommand) accepts --surface", () => {
 test("setup harness rejects --surface bogus with a bounded error", () => {
   const r = parseArgv(["setup", "harness", "--surface", "bogus"]);
   assert.equal(r.ok, false);
-  assert.match(r.error, /--surface must be 'compact' or 'full'/);
+  assert.match(r.error, /--surface must be 'code', 'compact', or 'full'/);
 });
 
 test("setup harness --surface requires a value", () => {

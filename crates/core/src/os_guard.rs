@@ -595,6 +595,7 @@ fn decode_utf16le_base64(text: &str) -> Option<String> {
             bytes.push(((bits >> pending) & 0xFF).to_le_bytes()[0]);
         }
     }
+    #[allow(clippy::chunks_exact_to_as_chunks)] // slice::as_chunks requires Rust > 1.92 MSRV
     let units: Vec<u16> = bytes
         .as_chunks::<2>()
         .0

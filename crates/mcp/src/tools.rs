@@ -833,7 +833,7 @@ impl std::fmt::Debug for TerminalCommanderMcpServer {
 }
 
 /// Adapter-level constant tied to `Cargo.toml`.
-const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Preferred MCP revision for `get_info` and `system_discover.mcp_spec`.
 pub(crate) use terminal_commander_ipc::MCP_SPEC_REVISION;
 const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
@@ -921,6 +921,14 @@ impl TerminalCommanderMcpServer {
         self
     }
 
+    pub(crate) const fn daemon_client(&self) -> &McpDaemonClient {
+        &self.daemon
+    }
+
+    pub(crate) const fn target_router(&self) -> &TargetRouter {
+        &self.target_router
+    }
+
     /// Single daemon-availability + version-skew guard shared by every
     /// daemon-backed tool. Returns the structured `daemon_unavailable`
     /// envelope when the daemon is unreachable, or the `daemon_version_skew`
@@ -932,7 +940,7 @@ impl TerminalCommanderMcpServer {
     /// method layers the skew gate on top. The diagnostic pair (`health`,
     /// `system_discover`) deliberately call `ensure_daemon_reachable` instead,
     /// so an operator can still inspect a version-skewed daemon.
-    async fn ensure_daemon_available(&self) -> Result<(), McpError> {
+    pub(crate) async fn ensure_daemon_available(&self) -> Result<(), McpError> {
         self.ensure_daemon_reachable().await?;
         // DEFECT B: an ALIVE but version-skewed daemon (e.g. a 0.1.47 WSL
         // runtime under a 0.1.69 adapter) must fail with an HONEST
@@ -964,7 +972,7 @@ impl TerminalCommanderMcpServer {
     /// A genuinely-down daemon's probe fails and the envelope is returned
     /// unchanged. The happy path (already available) is cheap: it never
     /// probes.
-    async fn ensure_daemon_reachable(&self) -> Result<(), McpError> {
+    pub(crate) async fn ensure_daemon_reachable(&self) -> Result<(), McpError> {
         // Cheap happy path: no status handle, or already available.
         let Some(status) = self.daemon.status() else {
             return Ok(());
@@ -1000,7 +1008,7 @@ impl TerminalCommanderMcpServer {
     ///
     /// Constitution IV: the returned client only ever dials a local socket
     /// PATH; no public TCP listener or network address is constructed.
-    async fn daemon_for_target(
+    pub(crate) async fn daemon_for_target(
         &self,
         target_id: Option<&str>,
     ) -> Result<McpDaemonClient, McpError> {
@@ -1024,7 +1032,7 @@ impl TerminalCommanderMcpServer {
     /// cannot prove the operator opted in). When `allow_remote` is false the
     /// remote request is refused with a typed, teaching `remote_denied`
     /// error -- the default-deny posture for federation.
-    async fn ensure_remote_allowed(&self, target_id: &str) -> Result<(), McpError> {
+    pub(crate) async fn ensure_remote_allowed(&self, target_id: &str) -> Result<(), McpError> {
         self.ensure_daemon_available().await?;
         match self.daemon.call(IpcRequest::PolicyStatus).await {
             Ok(IpcResponse::PolicyStatus(status)) => {
@@ -1050,7 +1058,7 @@ impl TerminalCommanderMcpServer {
     /// socket is unreachable or the timeout elapses (a down/unforwarded target
     /// is NOT an error here -- the caller reports `reachable: false`). Never
     /// spawns, never opens TCP.
-    async fn probe_target(&self, target: &RemoteTarget) -> Option<String> {
+    pub(crate) async fn probe_target(&self, target: &RemoteTarget) -> Option<String> {
         let client = self
             .target_router
             .client_for(target)
@@ -3847,6 +3855,34 @@ and their argv_template. Use a native shell route with exec, shell=route.executa
             St::TargetProbe(p) => self.target_probe(Parameters(p)).await,
         }
     }
+
+    /// `code_search` -- offline stub discovery for `TC_SURFACE=code`.
+    #[tool(
+        name = "code_search",
+        description = "Search the 60 Terminal Commander Code Mode Python functions and return exact keyword-only TypedDict signatures (no daemon needed). Omit query to list all 60 one-line signatures; pass a domain or keyword (e.g. 'run_and_watch', 'bucket', 'registry', 'file', 'pty') for full TypedDict stubs."
+    )]
+    pub(crate) async fn code_search(
+        &self,
+        Parameters(input): Parameters<crate::code_mode::CodeSearchInput>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(crate::code_mode::run_code_search(&input))
+    }
+
+    /// `code_execute` -- stateless pure-Rust Python 3.14-subset runner for `TC_SURFACE=code`.
+    #[tool(
+        name = "code_execute",
+        description = "Execute a Python 3.14-subset script in a pure-Rust zero-egress sandbox with all 60 Terminal Commander operations pre-bound as keyword-only functions (e.g. run_and_watch(argv=[...]), bucket_events_since(...), event_context(...), command_output_tail(...)). Intermediate outputs stay in Rust RAM; the final expression is returned as JSON."
+    )]
+    pub(crate) async fn code_execute(
+        &self,
+        Parameters(input): Parameters<crate::code_mode::CodeExecuteInput>,
+    ) -> Result<CallToolResult, McpError> {
+        crate::code_mode::run_code_execute(self, input).await
+    }
+
+    pub(crate) async fn code_surface_status(&self) -> Result<CallToolResult, McpError> {
+        crate::code_mode::code_surface_status(self).await
+    }
 }
 
 // Hand-written `ServerHandler` (replaces the rmcp `#[tool_handler]` macro) so
@@ -3877,10 +3913,10 @@ impl ServerHandler for TerminalCommanderMcpServer {
             .unwrap_or_else(crate::surface::surface_from_env)
         {
             crate::surface::Surface::Compact => crate::surface_list::compact_surface_tools(),
+            crate::surface::Surface::Code => crate::surface_list::code_surface_tools(),
             // `full` keeps the granular surface EXACTLY the 60 granular tools:
-            // the facade handler is registered on the same router, so filter
-            // its name(s) OUT of `list_all()` -- the facade must not leak into
-            // the full list.
+            // the facade and code-mode handlers are registered on the same
+            // router, so filter their names OUT of `list_all()`.
             crate::surface::Surface::Full => {
                 crate::surface_list::full_surface_tools(self.tool_router.list_all())
             }
@@ -3901,27 +3937,31 @@ impl ServerHandler for TerminalCommanderMcpServer {
         mut request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        // Admission gate FIRST: under `compact`, reject any name not on the
-        // facade set with a clear "set TC_SURFACE=full" message. Under `full`
-        // every name is admitted and the router routes by name as before.
-        crate::surface_list::enforce_surface(
-            self.surface_override
-                .unwrap_or_else(crate::surface::surface_from_env),
-            request.name.as_ref(),
-        )?;
-        // US1 strictness: for the facade tools, validate the raw call
-        // object against the advertised action schema BEFORE the router
-        // deserializes the *FacadeCall enum. A well-formed call passes untouched
-        // (byte-identical dispatch); a malformed one gets ONE teaching error
-        // naming the action + every missing/unknown field. Legacy granular tools
-        // are not facades and are not validated here.
-        if crate::surface_list::COMPACT_TOOL_NAMES.contains(&request.name.as_ref()) {
+        let active_surface = self
+            .surface_override
+            .unwrap_or_else(crate::surface::surface_from_env);
+        // Admission gate FIRST: under `compact` or `code`, reject any name not
+        // on the active surface. Under `full`, every name is admitted.
+        crate::surface_list::enforce_surface(active_surface, request.name.as_ref())?;
+        // US1 strictness: ONLY under `compact`, validate the raw call object
+        // against the advertised action schema BEFORE the router deserializes
+        // the *FacadeCall enum.
+        if active_surface == crate::surface::Surface::Compact
+            && crate::surface_list::COMPACT_TOOL_NAMES.contains(&request.name.as_ref())
+        {
             let mut call = serde_json::Value::Object(request.arguments.clone().unwrap_or_default());
             crate::facade_strict::normalize_facade_call(request.name.as_ref(), &mut call);
             crate::facade_strict::validate_facade_call(request.name.as_ref(), &call)?;
             request.arguments = call.as_object().cloned();
         }
-        // Delegate to the SAME router the macro used -- dispatch still flows
+        // Avoid colliding with `status_facade` on `self.tool_router`: under
+        // `TC_SURFACE=code`, `status` is a 0-arg liveness + counts check.
+        if active_surface == crate::surface::Surface::Code && request.name.as_ref() == "status" {
+            return self
+                .code_surface_status()
+                .await
+                .map(CallToolResponse::Complete);
+        }
         // through `self.tool_router`; no hand-rolled per-tool match.
         // Surface gates and facade_strict stay BEFORE the router.
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
@@ -3940,6 +3980,14 @@ impl ServerHandler for TerminalCommanderMcpServer {
         // validation (rmcp `handle_request`) behaves identically. The gate in
         // `call_tool` is what enforces the surface; `get_tool` only feeds
         // task-mode validation and never bypasses it.
+        let active_surface = self
+            .surface_override
+            .unwrap_or_else(crate::surface::surface_from_env);
+        if active_surface == crate::surface::Surface::Code && name == "status" {
+            return crate::surface_list::code_surface_tools()
+                .into_iter()
+                .find(|t| t.name.as_ref() == "status");
+        }
         self.tool_router.get(name).cloned()
     }
 
@@ -3956,16 +4004,21 @@ impl ServerHandler for TerminalCommanderMcpServer {
             // pull; this capability never makes the notification load-bearing.
             .enable_logging()
             .build();
+        let active_surface = self
+            .surface_override
+            .unwrap_or_else(crate::surface::surface_from_env);
+        let instructions = if active_surface == crate::surface::Surface::Code {
+            crate::code_mode::CODE_SURFACE_INSTRUCTIONS.to_owned()
+        } else {
+            "Terminal Commander runs commands and returns STRUCTURED SIGNALS, not raw output: your keyword/regex rules select the matching events, so noisy or long commands never flood your context. Routing: quick command -> run_and_watch (argv; start + bounded wait, one call). Long work -> command_start_combed, then bucket_wait in bounded slices and command_status for the exit state. No rule matched -> command_status returns a bounded receipt (exit code, suppressed-line count, last lines; lines_omitted counts what the tail leaves out). More output -> command_output_tail. Use shell_exec only for pipelines, compounds, or redirects. The default full_access profile inherits your harness's trust (nothing is denied unless a hardened profile is set); the one exception in every profile is the OS-infrastructure removal safeguard (os_critical_path_protected).".to_owned()
+        };
         ServerConfig::new(capabilities)
             .with_server_info(Implementation::new(
                 "terminal-commander-mcp",
                 ADAPTER_VERSION,
             ))
             .with_protocol_version(ProtocolVersion::V_2026_07_28)
-            .with_instructions(
-                "Terminal Commander runs commands and returns STRUCTURED SIGNALS, not raw output: your keyword/regex rules select the matching events, so noisy or long commands never flood your context. Routing: quick command -> run_and_watch (argv; start + bounded wait, one call). Long work -> command_start_combed, then bucket_wait in bounded slices and command_status for the exit state. No rule matched -> command_status returns a bounded receipt (exit code, suppressed-line count, last lines; lines_omitted counts what the tail leaves out). More output -> command_output_tail. Use shell_exec only for pipelines, compounds, or redirects. The default full_access profile inherits your harness's trust (nothing is denied unless a hardened profile is set); the one exception in every profile is the OS-infrastructure removal safeguard (os_critical_path_protected)."
-                    .to_owned(),
-            )
+            .with_instructions(instructions)
     }
 
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
@@ -3976,7 +4029,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
 /// Encode a serializable payload as a single MCP `ContentBlock::text` JSON
 /// blob. Bounded by the daemon-side caps; this helper never reads
 /// unbounded input.
-fn json_tool_result<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
+pub(crate) fn json_tool_result<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
     let text = serde_json::to_string(value).map_err(|e| {
         McpError::internal_error(Cow::Owned(format!("serialize response: {e}")), None)
     })?;
@@ -4265,7 +4318,7 @@ pub fn into_mcp_error(e: &IpcError) -> McpError {
     into_mcp_error_for(true, e)
 }
 
-fn unexpected_variant(_resp: &IpcResponse) -> McpError {
+pub(crate) fn unexpected_variant(_resp: &IpcResponse) -> McpError {
     // Do NOT interpolate the response's Debug shape ({resp:?}): IpcResponse
     // variants carry payloads (captured stream text, file-window content,
     // rule definitions) that would leak into the client-facing error and
@@ -4708,7 +4761,7 @@ fn daemon_version_skew_error(daemon: &str, adapter: &str) -> McpError {
 /// An unknown `target_id` is a caller-fixable input problem, so it routes
 /// through `invalid_params` (JSON-RPC -32602), carrying the offending id and
 /// a remedy pointing at `target_list`.
-fn route_error_to_mcp(err: &TargetRouteError) -> McpError {
+pub(crate) fn route_error_to_mcp(err: &TargetRouteError) -> McpError {
     match err {
         TargetRouteError::UnknownTarget(id) => {
             let payload = serde_json::json!({
@@ -8737,6 +8790,8 @@ mod tests {
                 "bucket_events_since".to_owned(),
                 "bucket_summary".to_owned(),
                 "bucket_wait".to_owned(),
+                "code_execute".to_owned(),
+                "code_search".to_owned(),
                 "command".to_owned(),
                 "command_output_tail".to_owned(),
                 "command_start_combed".to_owned(),

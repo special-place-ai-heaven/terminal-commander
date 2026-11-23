@@ -22,6 +22,7 @@
 //!
 //! Source-status: live.
 
+pub mod code_mode;
 pub mod daemon_client;
 pub mod discover_summary;
 pub mod facade_strict;

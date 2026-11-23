@@ -47,12 +47,8 @@ fn python() -> Option<&'static str> {
 }
 
 fn target_bin(name: &str) -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    let mut bin = exe
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("profile dir")
-        .join(name);
+    let bin_exe = PathBuf::from(env!("CARGO_BIN_EXE_terminal-commander"));
+    let mut bin = bin_exe.parent().expect("profile dir").join(name);
     if cfg!(windows) {
         bin.set_extension("exe");
     }

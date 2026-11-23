@@ -25,6 +25,7 @@ allow = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "CC0-1.0",
+    "BlueOak-1.0.0",
 ]
 confidence-threshold = 0.93
 
@@ -42,10 +43,8 @@ db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
 ignore = [
-  { id = "RUSTSEC-2026-0459", reason = "store DB is daemon-owned in the user's state dir; no less-trusted writer of db/-wal. Bump tracked in #286" },
-  { id = "RUSTSEC-2026-0457", reason = "rmcp OAuth client not compiled (features server,macros,transport-io; no oauth2/reqwest in lock). Bump tracked in #286" },
-  { id = "RUSTSEC-2026-0461", reason = "Streamable HTTP server transport not compiled; TC serves stdio only. Bump tracked in #286" },
-  { id = "RUSTSEC-2026-0462", reason = "Streamable HTTP clients not compiled (no reqwest/hyper in lock). Bump tracked in #286" },
+  { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill is unmaintained (unused on x86_64/aarch64 host targets); pulled transitively by postcard 1.1 default heapless-cas feature from monty 1.6. Remove once monty sets default-features = false on postcard or postcard drops heapless 0.7." },
+  { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained upstream (no upgrade available); pulled transitively by rmcp 3.9, schemars 1.2, and monty 1.6. Terminal Commander's own crates use time 0.3 directly." },
 ]
 
 [sources]

@@ -13,6 +13,7 @@ members = [
     "crates/mcp",
     "crates/cli",
     "crates/supervisor",
+    "crates/codemode",
 ]
 
 [workspace.package]
@@ -41,6 +42,7 @@ terminal-commander-sifters = { path = "crates/sifters", version = "0.3.19" } # x
 terminal-commander-probes  = { path = "crates/probes",  version = "0.3.19" } # x-release-please-version
 terminal-commander-store   = { path = "crates/store",   version = "0.3.19" } # x-release-please-version
 terminal-commander-ipc     = { path = "crates/ipc",     version = "0.3.19" } # x-release-please-version
+terminal-commander-codemode = { path = "crates/codemode", version = "0.3.19" } # x-release-please-version
 
 # Third-party crates referenced by SPEC / TC04 contract. Each is
 # declared here so member crates pick the same version. Concrete
@@ -95,6 +97,8 @@ significant_drop_tightening = "allow"
 # which for typed collections needs an explicit `[] as [T; 0]` cast to
 # compile. That is worse to read than `assert!(x.is_empty())` and weaker
 # for `&str`, so keep the plain form in tests.
+# Clippy 1.100+ MSRV lint (`slice::as_chunks` > 1.92 MSRV).
+chunks_exact_to_as_chunks = "allow"
 assert_is_empty = "allow"
 
 [profile.dev]

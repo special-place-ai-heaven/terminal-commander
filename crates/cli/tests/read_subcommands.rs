@@ -32,11 +32,8 @@ mod isolated_env;
 /// derive its path from the test binary's `target/<profile>/deps/<test>`
 /// location -> sibling `target/<profile>/<name>[.exe]`.
 fn target_bin(name: &str) -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    let profile_dir = exe
-        .parent() // deps/
-        .and_then(|p| p.parent()) // <profile>/
-        .expect("profile dir");
+    let bin_exe = PathBuf::from(env!("CARGO_BIN_EXE_terminal-commander"));
+    let profile_dir = bin_exe.parent().expect("profile dir");
     let mut bin = profile_dir.join(name);
     if cfg!(windows) {
         bin.set_extension("exe");
