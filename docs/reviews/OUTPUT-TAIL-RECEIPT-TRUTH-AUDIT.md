@@ -68,3 +68,44 @@ still exhibits the incident. Published source verification does not certify
 the installed binary; a verified upgrade is required before its receipts can
 be trusted for this case. An old discarded payload cannot be recovered by
 reading its tail again.
+
+## Owner-forwarded SymForge recurrence — 2026-10-10
+
+The owner forwarded another SF builder report from the unchanged installed TC
+daemon. The transfer observations below are SF-reported; TC independently
+rechecked job status metadata, without reading or reproducing the patch payload.
+
+Original transfer: `job_01a1236b1e5c7162a14cf587b416031f`.
+
+- Tail request: `max_bytes=64000`, `max_lines=2`.
+- Returned 8,192 base64 characters, decoding to 6,144 bytes.
+- Both `truncated_bytes` and `truncated_lines` were false; the `End Patch`
+  sentinel was missing. No patch was applied from this incomplete transfer.
+- The original exact patch byte count was not emitted. Its size was reported
+  only as approximately 16.6 KiB; do not assign it the retry's exact byte count.
+
+Wrapped retry: `job_01a1236bd3b9764c9c517f3c77041e20`.
+
+The retry declared `PATCH_BYTES=16565`. SF reports verifying all 16,565 decoded
+bytes and the final sentinel. This establishes completeness for that retry;
+it does not make the original truncation receipt truthful.
+
+TC's status-only recheck returned:
+
+| Job | State / exit | Outcome trust | `bytes_total` | stdout / stderr frames |
+|---|---|---|---|---|
+| Original transfer | `exited` / 0 | `observed` | 22,089 | 1 / 0 |
+| Wrapped retry | `exited` / 0 | `observed` | 22,112 | 7 / 0 |
+
+These counters describe command output, including encoding and any headers or
+line delimiters; they are not decoded patch sizes or proof of complete capture.
+The reported decoded counts, tail flags and sentinel checks were not independently
+rerun by TC. Exit 0 does not establish transfer completeness.
+
+This is a recurrence on the unchanged installed daemon, not evidence that the
+published source repair failed. The v0.3.15 release and registry verification are
+recorded in [the implementation report](EMBED-PARITY-IMPLEMENTATION.md).
+The bounded frame cap still discards oversized-line suffixes; the repair makes
+that loss observable rather than recovering discarded bytes. No reported job was
+replayed, no patch was applied by TC, and no daemon restart or competing test
+suite was performed for this report.

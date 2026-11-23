@@ -1,8 +1,9 @@
 # AAP integration: TC and SymForge room services
 
-As of 2026-10-09. Architecture recommendation grounded in inspected source.
-This document does not claim that AAP integration or a new upstream release is
-complete. TC's supported entry point and parity matrix are documented in
+As of 2026-10-09 for the AAP inspection; TC pointer audit updated 2026-10-10.
+Architecture recommendation grounded in inspected source. This document does
+not certify completed AAP integration or SymForge parity. TC's supported entry
+point and parity matrix are documented in
 [EMBEDDING.md](../EMBEDDING.md) and [PARITY.md](PARITY.md).
 
 Use an AAP-owned service bridge with room-local TC and SymForge engines. Keep
@@ -49,6 +50,13 @@ dependency layers and safe content-addressed caches. Keep mutable indexes,
 workspace overlays, job/output stores, replay state and credentials owned by
 the room's authority boundary.
 
+Agents within one room authority should reuse one guest-local TC engine through
+the shared broker. Keep independent agent/room grants in that broker and validate
+them before every dispatch. TC handle clones share configuration, store, boot
+identity and lifecycle; they do not create isolated per-caller policy. Keep
+distinct room authorities on independently owned TC engines until a verified
+native contract supports sharing that boundary.
+
 Measure room startup time, idle/active engine memory, index concurrency, retained
 output/disk, process counts and event subscribers before introducing shared
 mutable engines across rooms. No resource-saving claim has been benchmarked
@@ -70,10 +78,17 @@ typed requests. It already carries room/session identity, recovery generation,
 workspace fence, operation identity, manifest/capability/permission digests and
 deadline. Authentication and authorization must run before engine dispatch.
 
+Bind grants, continuations and routed requests to the fresh serving engine/boot
+instance plus room, session/recovery generation and rights generation. Validate
+that binding at admission and before publishing a continuation or response.
+Repeated counters cannot reauthorize an old grant or cursor after restart.
+These room/rights fields belong to the host envelope; TC's native correlation
+envelope and credential challenge do not supply room authorization.
+
 Each service response should preserve:
 
 - Engine version, service API/schema version, build identity and engine instance.
-- Room/session generation and operation identity from the authorized request.
+- Room/session/recovery and rights generations and authorized operation identity.
 - Typed success, refusal, unavailable, cancelled or uncertain outcome.
 - Complete provenance/observation metadata, truncation and response bounds.
 - Continuation cursor/publication fence where applicable.
@@ -110,7 +125,18 @@ authorize an old continuation. Preserve the semantic operation and SHA-256
 canonical argument hash independently of capture evidence. Encoded request and
 complete reply-frame limits are separate from decoded query-content budgets.
 Never trim provenance, refusal or recovery fields to fit an otherwise oversized
-success; return a typed bound refusal.
+success. A refusal before dispatch can establish that the current attempt did
+not start new work. An oversized or timed-out reply after admission cannot:
+preserve operation identity and observed state/uncertainty, then reconcile.
+Cancelling a request or awaiting future is not proof that a started effect stopped.
+Use the engines' actual status, cleanup and mutation-recovery evidence.
+
+The TC pointer audit found that `execute_envelope` checks the encoded request
+envelope, while response sizing checks successful inner `IpcResponse` values.
+It does not yet bound every complete response envelope or error. Enforce AAP's
+complete frame cap separately, including metadata and transport framing.
+Decoded content compliance does not imply encoded JSON compliance; this remains
+a native verification/fix gap, not a completed TC guarantee.
 
 The SymForge agent also reports a reproduced symbol-replacement overlap defect:
 the actual splice can exceed the previously checked range. Its shared MCP/embed
@@ -119,10 +145,17 @@ include that regression passing and retain byte-exact source/generation/range
 evidence; this handoff does not certify the pending fix.
 
 Credential references belong in manifests; resolved values belong in the local
-service owner. Give each service/probe its own scoped credentials and
-operation-specific readiness check. Advertise a capability only after its
-implementation, authorization and current availability are established. A healthy
-engine does not prove that every configured MCP service is connected or usable.
+service owner. Admit each probe's explicit executable, cwd, effective environment
+and scoped credential references against its room and rights generation before
+invocation. Do not substitute ambient credentials, global configuration or an
+unadmitted executable when resolution fails. This is the host probe contract;
+existing inherited TC shell/PTY lanes do not establish it automatically.
+Resolved credential values stay out of model context, wire diagnostics and logs.
+
+Give each service/probe an operation-specific readiness check. Advertise a
+capability only after its implementation, authorization and current availability
+are established. A healthy engine does not prove that every configured MCP
+service is connected or usable.
 
 ## Current AAP evidence
 
@@ -165,6 +198,27 @@ and was not compiled by the TC agent.
 5. Run the same capability fixtures through direct embeds and guest transport:
    discovery, cleared execution, combed output/cursors, cancellation, resources,
    stale generation, disconnect/reconnect, room isolation and recovery.
+
+The 2026-10-10 pointer audit adds acceptance evidence to collect, without expanding
+this TC implementation pass. Compile a standalone public-API consumer outside
+the workspace with only production dependencies/features; workspace examples
+and integration tests do not exclude dev-feature unification. Run it on Windows
+and Linux with stale grants/cursors after an actual engine replacement, changed
+rights generations, and an actual owner-process crash. Witness a started effect
+and target state when testing reply timeout/cancellation; a simulated graceful
+restart or cached response is insufficient recovery evidence.
+
+The inspected TC suite includes boot-identity replacement, stale/foreign
+credential-challenge cases and an abrupt owner-process exit fixture that checks
+`JobLost` and one child launch. Those fixtures do not establish external-consumer
+compilation or host room/rights fencing. No standalone consumer gate was located
+in the bounded audit; neither OS was rerun in this documentation pass.
+
+The [filesystem communication proposal](../contracts/communication-filesystem-v1.md)
+already requires separate compressed/expanded bounds, immutable publication,
+durable receiver ACK and refusal of guarantees unsupported by the actual mount.
+It remains design-only; queued, submitted or read observations are not delivery
+ACKs.
 
 Recovery must distinguish engine replacement from successful work. TC `JobLost`
 and abandoned receipts remain uncertain; do not automatically rerun commands.

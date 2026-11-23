@@ -101,12 +101,24 @@ CLI behavior is unchanged.
 
 For a service bridge use `execute(IpcRequest)` or
 `execute_envelope(RequestEnvelope) -> ResponseEnvelope`. Both use the shared
-dispatch and frame-size limits. Request/response types are Serde serializable;
-the host must bound input bytes before deserializing, authenticate the transport,
-and enforce its deadline and room authority envelope. The embedded engine accepts
-no caller-selected peer identity. Correlation IDs identify responses, not durable
-idempotency or replay rights. Never retry a non-idempotent operation merely because
-the transport lost its reply.
+dispatcher. Request/response types are Serde serializable; the host must bound
+input bytes before deserializing, authenticate the transport, and enforce its
+deadline and room authority envelope. The embedded engine accepts no
+caller-selected peer identity.
+
+The current envelope implementation checks the encoded request envelope, but its
+response-size check covers successful inner `IpcResponse` values. It does not
+establish a bound for every complete `ResponseEnvelope`, including errors.
+The host must check its complete encoded frames, including outer metadata and
+framing, separately from decoded content budgets. A decoded file-content limit
+does not prove that escaped JSON fits the encoded frame. This response-envelope
+gap remains open; the host check does not certify a native fix.
+
+Correlation IDs identify responses, not durable idempotency or replay rights.
+Cancelling the awaiting call or timing out its reply does not prove that admitted
+work stopped. Preserve observed status and cleanup evidence, or uncertainty when
+that evidence is unavailable, and reconcile with the engine and actual target
+state. Never retry a non-idempotent operation merely because its reply was lost.
 
 An engine can run inside each container, process sandbox or VM and expose this
 boundary over a host-owned channel, including a Unix socket or VM/vsock bridge.

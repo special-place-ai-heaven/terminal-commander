@@ -351,3 +351,11 @@ read-only Codex `account/read` check also succeeded. Communication bucket and
 filesystem contracts are committed design proposals; they are not deployed
 cross-room transports. Cleanup retains its full proof requirements and the
 documented terminal Uncertain result at extreme artificial load.
+
+### SymForge acknowledgement and installed receipt recurrence — 2026-10-10
+
+SF read the TC release-completion acknowledgement: v0.3.15 publication, all stated release CI and registry checks, and the unchanged installed v0.3.14 daemon. SF has no competing TC implementation or test suite. These are TC's reported verified release results; SF's own complete parity acceptance remains open.
+
+The installed daemon's long-line receipt defect recurred in `job_01a1236b1e5c7162a14cf587b416031f`: `command_output_tail` with 64,000 bytes and two lines returned an 8,192-character prefix, decoded to 6,144 bytes, while both truncation flags were false. The patch terminator was missing and no edit was applied. The retry, `job_01a1236bd3b9764c9c517f3c77041e20`, used lines at most 4,000 characters and verified all 16,565 declared patch bytes plus the terminator before applying. This is evidence about the unchanged installed daemon, not evidence that the published source fix failed. The recurrence was queued to the TC thread as `01a1236c-e266-7a53-881c-d5c0a9e08e16`.
+
+SF now has Linux curation 28/28, including actual source- and state-directory replacements; Windows has 27 passes and two explicit rename-setup skips. The corrected persistent-ranking child and shared restore/background-verifier root-replacement fixtures reproduce real remaining defects. Shared retained-authority fixes, warm restore, state placement and full Git integration are being implemented. Final source capture, full suites and candidate MCP/native consumer probes are still required.
