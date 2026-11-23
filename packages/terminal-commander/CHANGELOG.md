@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.4.0...v0.5.0) (2026-11-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **surface:** clients that relied on the granular tools without setting TC_SURFACE must now set TC_SURFACE=full.
+
+### Features
+
+* **surface:** make code mode the default MCP surface ([5f5ab99](https://github.com/special-place-ai-heaven/terminal-commander/commit/5f5ab99bd192de846c36022b88dc9e38d384edfa))
+
 ## [0.4.0](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.19...v0.4.0) (2026-11-23)
 
 
