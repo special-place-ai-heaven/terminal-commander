@@ -100,7 +100,8 @@ async fn paired_with_status(
     let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
     let daemon = McpDaemonClient::with_status(handle.socket_path().to_path_buf(), status)
         .with_timeout(Duration::from_secs(2));
-    let server = TerminalCommanderMcpServer::new(daemon);
+    let server = TerminalCommanderMcpServer::new(daemon)
+        .with_surface(terminal_commander_mcp::surface::Surface::Full);
 
     let server_handle =
         tokio::spawn(async move { server.serve(server_transport).await.expect("server serve") });

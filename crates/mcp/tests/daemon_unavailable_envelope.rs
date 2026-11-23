@@ -77,7 +77,8 @@ async fn paired_service_unavailable() -> (
     let status = DaemonStatusHandle::new(make_unavailable_status());
     let daemon =
         McpDaemonClient::with_status(socket, status).with_timeout(Duration::from_millis(150));
-    let server = TerminalCommanderMcpServer::new(daemon);
+    let server = TerminalCommanderMcpServer::new(daemon)
+        .with_surface(terminal_commander_mcp::surface::Surface::Full);
 
     let server_handle =
         tokio::spawn(async move { server.serve(server_transport).await.expect("server serve") });
