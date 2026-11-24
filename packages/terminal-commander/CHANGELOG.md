@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.1](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.5.0...v0.5.1) (2026-11-24)
+
+
+### Features
+
+* **cli:** accept --surface mcp-full and mcp-compact ([783e111](https://github.com/special-place-ai-heaven/terminal-commander/commit/783e111e4749d4c1380b111844d5149caeb50176))
+
+
+### Bug Fixes
+
+* **update:** choose the tool surface, report the version, update big Claude configs ([724cd4a](https://github.com/special-place-ai-heaven/terminal-commander/commit/724cd4a570cfe8cdc1bac3fcf6e44cf535c94f29))
+* **update:** choose the tool surface, report the version, update big Claude configs ([d8a5863](https://github.com/special-place-ai-heaven/terminal-commander/commit/d8a58630837090c20677e9eba6f912b2f67d18c6))
+
 ## [0.5.0](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.4.0...v0.5.0) (2026-11-23)
 
 
