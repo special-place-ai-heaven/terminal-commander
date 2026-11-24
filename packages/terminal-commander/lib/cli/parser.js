@@ -36,6 +36,8 @@
 
 "use strict";
 
+const { normalizeSurface } = require("./surface_prompt.js");
+
 const BOOLEAN_FLAGS = new Set([
   "--help",
   "--global",
@@ -179,9 +181,10 @@ function parseArgv(argv) {
       if (flags.global === true && flags.project != null) {
         return makeError("--global and --project are mutually exclusive");
       }
+      if (flags.surface != null) flags.surface = normalizeSurface(flags.surface);
       if (flags.surface != null && !SURFACE_VALUES.has(flags.surface)) {
         return makeError(
-          `flag --surface must be 'code', 'compact', or 'full' (got '${flags.surface}')`,
+          `flag --surface must be 'code', 'mcp-full', or 'mcp-compact' (got '${flags.surface}')`,
         );
       }
       return {
@@ -371,13 +374,15 @@ FLAGS
                                       codex-cli, omp, claude-code,
                                       claude-desktop, gemini, grok, kilo-code,
                                       kimi [unverified]).
-  --surface <code|compact|full>       MCP tool surface the configured server
+  --surface <code|mcp-full|mcp-compact>
+                                      MCP tool surface the configured server
                                       advertises. Writes env.TC_SURFACE into
                                       each harness stanza (cursor, claude-code,
                                       claude-desktop). Omit to leave it unset
                                       (server default: code). 'code' = 3 Code Mode
-                                      tools; 'compact' = 6 verb facades;
-                                      'full' = all 60 tools.
+                                      tools; 'mcp-compact' = 6 verb facades;
+                                      'mcp-full' = all 60 tools ('full' and
+                                      'compact' are accepted too).
   --uninstall                         (daemon-logon only) Remove the per-user
                                       logon Scheduled Task.
   --help, -h                          Show this panel.

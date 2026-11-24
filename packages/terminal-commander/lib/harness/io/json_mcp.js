@@ -10,7 +10,8 @@ const path = require("node:path");
 const { atomicWriteWithBackup, ATOMIC_REASONS, stripBom } = require("./atomic.js");
 const { mergeManagedServer } = require("./managed_server.js");
 
-const MAX_CONFIG_BYTES = 256 * 1024;
+// Claude Code keeps history in ~/.claude.json, so it routinely passes 256 KiB.
+const MAX_CONFIG_BYTES = 16 * 1024 * 1024;
 
 const JSON_MCP_STATUSES = Object.freeze({
   CONFIG_CREATED: "config_created",

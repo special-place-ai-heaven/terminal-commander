@@ -28,7 +28,59 @@ function isVersionRequest(argv) {
 }
 
 function isUpdateRequest(argv) {
-  return argv.length === 1 && argv[0] === "update";
+  return argv[0] === "update";
+}
+
+const UPDATE_MODES = new Set(["code", "full", "compact"]);
+
+/** `update [--surface <code|full|compact>]` -> { mode } or { error }. */
+function parseUpdateArgs(argv) {
+  const rest = argv.slice(1);
+  if (rest.length === 0) return { mode: undefined };
+  let flag = rest[0];
+  let value = rest[1];
+  const eq = flag.indexOf("=");
+  if (eq > 0) {
+    value = flag.slice(eq + 1);
+    flag = flag.slice(0, eq);
+  }
+  const used = eq > 0 ? 1 : 2;
+  if (flag !== "--surface" || rest.length !== used) {
+    return { error: "usage: terminal-commander update [--surface code|mcp-full|mcp-compact]" };
+  }
+  const mode = require("../lib/cli/surface_prompt.js").normalizeSurface(value || "");
+  if (!UPDATE_MODES.has(mode)) {
+    return { error: `terminal-commander: --surface must be code, mcp-full or mcp-compact (got '${value || ""}')` };
+  }
+  return { mode };
+}
+
+function askLine(question) {
+  const readline = require("readline");
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => rl.question(question, (answer) => {
+    rl.close();
+    resolve(answer);
+  }));
+}
+
+/** Mode for this update: flag, else a menu at a terminal, else undefined (keep configured). */
+function resolveUpdateMode(flagMode) {
+  const { chooseSurface } = require("../lib/cli/surface_prompt.js");
+  const { claudeSurface } = require("../lib/cli/agent_surface.js");
+  const { claudeCodeMcpConfigPath } = require("../lib/harness/paths.js");
+  let current = "code";
+  try {
+    current = claudeSurface(claudeCodeMcpConfigPath({}));
+  } catch (_e) {
+    /* no home dir: keep the server default */
+  }
+  return chooseSurface({
+    flag: flagMode,
+    interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    current,
+    ask: askLine,
+  });
 }
 
 function isJsCliRequest(argv) {
@@ -149,7 +201,13 @@ async function runVersion() {
   }
 }
 
-function runUpdate() {
+async function runUpdate() {
+  const parsed = parseUpdateArgs(args);
+  if (parsed.error) {
+    process.stderr.write(`${parsed.error}\n`);
+    process.exit(64);
+  }
+  const mode = await resolveUpdateMode(parsed.mode);
   const invocation = npmInvocation();
   if (!invocation) {
     process.stderr.write(
@@ -184,7 +242,7 @@ function runUpdate() {
         // update.rs re-spawning the new binary) — never in-process, which would
         // re-register the OLD paths. Best-effort: never turn a successful update
         // into a failure.
-        reregisterHarnesses(() => process.exit(0));
+        reregisterHarnesses(mode, () => process.exit(0));
         return;
       }
       process.exit(code == null ? 1 : code);
@@ -281,7 +339,7 @@ function warnIfStaleLauncher(installedRoot) {
 
 // Re-run `setup harness` with the freshly-installed launcher. Always invokes
 // `done` (success or not) so a setup hiccup never fails the update.
-function reregisterHarnesses(done) {
+function reregisterHarnesses(mode, done) {
   const { entry, reason } = globalLauncherEntry();
   if (!entry) {
     process.stderr.write(
@@ -290,19 +348,41 @@ function reregisterHarnesses(done) {
     done();
     return;
   }
-  warnIfStaleLauncher(path.resolve(entry, "..", ".."));
-  const child = spawn(process.execPath, [entry, "setup", "harness"], {
+  const installedRoot = path.resolve(entry, "..", "..");
+  warnIfStaleLauncher(installedRoot);
+  reportInstalledVersion(installedRoot);
+  // An explicit surface must reach every harness; Codex only rewrites its entry under --force.
+  const setupArgs = mode ? ["setup", "harness", "--surface", mode, "--force"] : ["setup", "harness"];
+  const child = spawn(process.execPath, [entry, ...setupArgs], {
     stdio: "inherit",
     shell: false,
     env: process.env,
   });
-  child.on("exit", () => done());
+  child.on("exit", () => {
+    process.stdout.write(
+      `terminal-commander: tool surface ${mode ? `set to ${mode}` : "unchanged"}. Restart running agent sessions (Claude Code, Codex, ...) so they reconnect to the updated adapter.\n`,
+    );
+    done();
+  });
   child.on("error", () => {
     process.stderr.write(
       "terminal-commander: update installed; harness refresh did not start. Run 'terminal-commander setup harness'.\n",
     );
     done();
   });
+}
+
+function reportInstalledVersion(installedRoot) {
+  try {
+    const v = JSON.parse(fs.readFileSync(path.join(installedRoot, "package.json"), "utf8")).version;
+    process.stdout.write(
+      v === pkg.version
+        ? `terminal-commander: already on the latest version (${v}).\n`
+        : `terminal-commander: updated ${pkg.version} -> ${v}.\n`,
+    );
+  } catch (_e) {
+    /* best-effort: never turn a successful update into a failure */
+  }
 }
 
 function writeCliResult(result) {

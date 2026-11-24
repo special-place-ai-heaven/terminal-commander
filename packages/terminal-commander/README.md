@@ -54,6 +54,12 @@ terminal-commander update
 
 This runs `npm install -g terminal-commander@latest`.
 
+At a terminal, `update` asks which tool surface to configure (code mode,
+MCP full, or MCP compact; Enter keeps the current one). Agents and scripts
+pass `--surface code|mcp-full|mcp-compact` instead; with no terminal and no flag the
+configured surface is kept. It prints the installed version and reminds you to
+restart running agent sessions, whose adapters the update stops.
+
 On Windows, update first runs a native scoped lock preflight. It asks matching
 daemons to exit, then terminates Terminal Commander binaries still running from
 the installed package. If one cannot be stopped, update stops and the installed
