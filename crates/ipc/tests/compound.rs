@@ -79,6 +79,7 @@ fn zero_budget_starts_once_polls_status_then_drains_and_keeps_identity() {
             Ok(status(&start, JobState::Running)),
             Ok(bucket(&start, 4, 5, vec![signal(&start, 5, false)])),
             Ok(bucket(&start, 5, 6, vec![signal(&start, 6, true)])),
+            Ok(status(&start, JobState::Running)),
         ]);
         let mut calls = Vec::new();
         let outcome = run_and_watch(
@@ -371,5 +372,56 @@ fn default_signal_cap_ends_wait_and_hard_caps_are_enforced() {
                 assert_eq!(outcome.cursor, 4);
             }
         }
+    });
+}
+
+#[test]
+fn full_wait_ms_is_waited_and_final_status_is_refreshed_at_the_deadline() {
+    runtime().block_on(async {
+        let start = started();
+        let mut statuses = 0;
+        let beginning = Instant::now();
+        let outcome = run_and_watch(
+            params(),
+            RunAndWatchOptions {
+                wait_ms: 1000,
+                ..Default::default()
+            },
+            |r| {
+                let mut delay = 0;
+                let response = match r {
+                    IpcRequest::CommandStartCombed(_) => {
+                        IpcResponse::CommandStartCombed(start.clone())
+                    }
+                    IpcRequest::CommandStatus(_) => {
+                        statuses += 1;
+                        // The job ends during the one-second slice: only a status
+                        // read after the slice can see it.
+                        status(
+                            &start,
+                            if statuses == 1 {
+                                JobState::Running
+                            } else {
+                                JobState::Exited
+                            },
+                        )
+                    }
+                    IpcRequest::BucketWait(p) => {
+                        delay = p.timeout_ms.unwrap();
+                        bucket(&start, p.cursor, p.cursor, vec![])
+                    }
+                    _ => panic!("unexpected request"),
+                };
+                async move {
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    Ok(response)
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert!(beginning.elapsed() >= Duration::from_millis(1000));
+        assert!(outcome.complete);
+        assert!(!outcome.wait_exhausted);
     });
 }
